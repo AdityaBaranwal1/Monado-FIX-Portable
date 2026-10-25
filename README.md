@@ -223,8 +223,6 @@ Advanced switches are environment variables (`XCDE_*`, `LARECOMP_*`). The most u
 - **Minor and open:**
   - One vertex shader uses `SHFL` (a warp shuffle), approximated as lane-local.
   - Deterministic replays drift by a few pixels after ~2,000 frames (T124).
-  - 9 of the 65 Heart-to-Hearts don't trigger from the test tours, probably because of affinity requirements;
-    unconfirmed in normal play.
 - **Linux / macOS:** code paths inherited from LASRecomp exist (`runtime/platform/linux.c`), but this project was only
   built and tested on Windows.
 
