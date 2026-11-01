@@ -15,6 +15,9 @@
 extern "C" {
 #endif
 
+// [VEGA-FIX] Runs fn(arg); returns false if it died with an integer divide by zero meanwhile (a graphics driver compiler
+// bug: amdvlk64.dll on Vega iGPUs) - the thread then continues after the call instead of taking the process down.
+bool plat_try_call(void (*fn)(void *), void *arg);
 // ---- guest address space
 // Claim [lo, hi) for the guest at exactly that address, readable/writable (pages may be backed lazily).
 bool plat_reserve_guest(uint64_t lo, uint64_t hi);

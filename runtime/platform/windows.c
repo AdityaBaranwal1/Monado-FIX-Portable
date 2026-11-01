@@ -36,8 +36,29 @@ static bool lazy_commit(uint64_t a) {
 
 static bool g_report_crashes;
 
+// [VEGA-FIX] plat_try_call: the context captured before the call; the handler below restores it on a divide by zero.
+static __thread CONTEXT *tl_guard_ctx;
+static __thread volatile int *tl_guard_hit;
+
+bool plat_try_call(void (*fn)(void *), void *arg) {
+    CONTEXT ctx;
+    volatile int hit = 0;
+    RtlCaptureContext(&ctx);
+    if (hit) { tl_guard_ctx = NULL; return false; }  // (back here from the handler)
+    tl_guard_hit = &hit;
+    tl_guard_ctx = &ctx;
+    fn(arg);
+    tl_guard_ctx = NULL;
+    return true;
+}
+
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (tl_guard_ctx && er->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
+        CONTEXT *c = tl_guard_ctx;
+        *tl_guard_hit = 1;
+        RtlRestoreContext(c, NULL);  // (does not return)
+    }
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t fa = er->ExceptionInformation[1];
     // (not for an execute fault: on a read-write page, retrying it would fault again forever)

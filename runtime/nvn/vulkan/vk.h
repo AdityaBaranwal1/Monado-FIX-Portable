@@ -35,6 +35,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, robust2, logic_op, minmax;
+    bool legacy11;  // Vulkan 1.1 device (Android / Mali): no 1.3 features enabled; vk_compat.c bridges the calls (XCDE_VK_LEGACY=2 forces it)
     bool gpl;  // [XCDE] T188: VK_EXT_graphics_pipeline_library with fast linking (exec.c build_pipeline)
     // [XCDE] FSR 3 frame generation's queues (device.c create_device): present, image acquire, async compute; fam UINT32_MAX: none
     VkQueue fg_queue[3];
@@ -131,3 +132,6 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 
 // ---- device / window (device.c)
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+
+// Vulkan 1.1 shims for sync2 calls (Android / Mali): redirects vkCmdPipelineBarrier2 etc. to vk_compat.c
+#include "vk_compat.h"

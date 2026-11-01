@@ -280,3 +280,6 @@ int plat_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 
 int plat_thread_backtrace(void *pthread_handle, uint64_t *pcs, int max) { (void)pthread_handle; (void)pcs; (void)max; return 0; }
 int plat_guest_find(const unsigned char *pat, unsigned long n, unsigned long long *out, int max) { (void)pat; (void)n; (void)out; (void)max; return 0; }  // [XCDE] (not wired)
 unsigned long long plat_guest_dump(const char *path) { (void)path; return 0; }  // [XCDE] (not wired)
+
+// [VEGA-FIX] no crash guard on this platform: just run it
+bool plat_try_call(void (*fn)(void *), void *arg) { fn(arg); return true; }

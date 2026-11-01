@@ -1,6 +1,7 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include "../../diag/diag.h"
 #include "../../kernel.h"
+#include "../../platform.h"
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
 #include <float.h>
@@ -1571,7 +1572,9 @@ static void begin_pass(void) {
     if (g_watch_img && has_d && st.rt.depth && ((TexBackend *)st.rt.depth->backend)->image == g_watch_img) vk_watch(g_watch_img, "begin_pass (depth attachment)");
     for (uint32_t i = 0; i < pass_ncolor; i++) if (g_watch_img && st.rt.color[i] && st.rt.color[i]->backend && ((TexBackend *)st.rt.color[i]->backend)->image == g_watch_img) vk_watch(g_watch_img, "begin_pass (COLOR attachment)");
     pass_mark_attachments();  // [XCDE] T162
+    g_vkc_samples = pass_samples;  // (Vulkan 1.1 path: the render pass needs the sample count; vk_compat.c)
     vkCmdBeginRendering(cb, &ri);
+    g_vkc_samples = 1;
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
     if (oq_counting) oq_begin(cb);  // [XCDE] T139: this pass's samples count toward the open counter
@@ -2919,6 +2922,25 @@ static void build_pipeline_(void *arg) {
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
 }
 
+typedef struct { const VkGraphicsPipelineCreateInfo *pi; VkPipeline *out; VkResult r; } PwCall;
+static void pw_call(void *a) {
+    PwCall *c = a;
+    c->r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, c->pi, NULL, c->out);
+}
+// [VEGA-FIX] what a pipeline the driver crashed on was made of (build/last_game.log)
+static void pw_log_key(const PipeKey *k, int n) {
+    char b[1500]; int o = 0;
+    o += snprintf(b + o, sizeof b - o, "[vk] DRIVER CRASH #%d (divide by zero) in a pipeline: vs %llx fs %llx gs %d | ncolor %u color", n,
+                  (unsigned long long)k->prog->code[0], (unsigned long long)k->prog->code[1], k->prog->gi != NULL, k->ncolor);
+    for (uint32_t i = 0; i < k->ncolor && i < 8; i++) o += snprintf(b + o, sizeof b - o, " %d(mask %x blend %d)", (int)k->color[i], k->write_mask[i], (k->blend_on >> i) & 1);
+    o += snprintf(b + o, sizeof b - o, " | depth %d stencil %d | samples %u a2c %d | topo %d fill %d logic %d | no_fs %d | attrs %x streams %x |",
+                  (int)k->depth, (int)k->stencil, k->samples, k->a2c, k->topo_class, k->poly_fill, k->logic_op, k->prog->no_fs, k->attr_mask, k->used_streams);
+    for (int s = 0; s < 17; s++) if (k->used_streams & (1u << s)) o += snprintf(b + o, sizeof b - o, " s%d(stride %u div %u)", s, k->stride[s], k->divisor[s]);
+    o += snprintf(b + o, sizeof b - o, " | fmt");
+    for (int i = 0; i < 32; i++) if (k->attr_mask & (1u << i)) o += snprintf(b + o, sizeof b - o, " a%d:%u@%u/b%u", i, k->attr_fmt[i], k->attr_off[i], k->attr_bind[i]);
+    LOG("%s%c", b, 10);
+}
+
 static VkResult pipeline_whole(const PipeKey *k, VkPipelineCreateFlags flags, VkPipeline *out) {
     VkPipelineShaderStageCreateInfo stages[3] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"},
@@ -2975,7 +2997,17 @@ static VkResult pipeline_whole(const PipeKey *k, VkPipelineCreateFlags flags, Vk
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout, .flags = flags};
-    return vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, out);
+    // [VEGA-FIX] amdvlk64.dll (Vega iGPU, Windows) died here with an integer divide by zero (c0000094) in its shader
+    // compiler and the whole game closed. The call is guarded: that pipeline just fails (its draws are skipped like
+    // any program that failed to build) and its key is logged, to find out which state the driver chokes on.
+    PwCall pc = {&pi, out, VK_ERROR_INITIALIZATION_FAILED};
+    if (!plat_try_call(pw_call, &pc)) {
+        static int nc;
+        if (nc++ < 40) pw_log_key(k, nc);
+        *out = VK_NULL_HANDLE;
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    return pc.r;
 }
 
 // ================================================================== [XCDE] T163: shader variant cache (precompilation)

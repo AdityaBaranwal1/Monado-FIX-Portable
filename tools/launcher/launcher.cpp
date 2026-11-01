@@ -441,7 +441,7 @@ static void launch() {
     std::string cmd = "\"" + exe + "\" targets";
     // the game's DLLs (SDL3, Vulkan loader, FFmpeg, opus) come from MSYS2
     const char *old = getenv("PATH");
-    std::string p = std::string("C:\\msys64\\ucrt64\\bin;") + (old ? old : "");
+    std::string p = g_root + "\\build;" + "C:\\msys64\\ucrt64\\bin;" + (old ? old : "");  // [portable] the folder's own DLLs first
     SetEnvironmentVariableA("PATH", p.c_str());
     STARTUPINFOA si = {};
     si.cb = sizeof si;
@@ -505,7 +505,7 @@ static void pc_start(bool then_play) {
     std::string exe = path("build/xcde.exe");
     std::string cmd = "\"" + exe + "\" --precompile targets";
     const char *old = getenv("PATH");
-    std::string p = std::string("C:\\msys64\\ucrt64\\bin;") + (old ? old : "");
+    std::string p = g_root + "\\build;" + "C:\\msys64\\ucrt64\\bin;" + (old ? old : "");  // [portable] the folder's own DLLs first
     SetEnvironmentVariableA("PATH", p.c_str());
     CreateDirectoryA(path("cache").c_str(), NULL);
     DeleteFileA(path("cache/precompile_progress.txt").c_str());

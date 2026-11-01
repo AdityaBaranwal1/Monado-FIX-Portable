@@ -580,6 +580,14 @@ int vk_precompile_main(const char *root) {
             nthreads = cap;
         }
     }
+    if (!getenv("XCDE_PRECOMPILE_THREADS") && g_vk.props.vendorID == 0x1002 &&
+        g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && nthreads > 2) {  // [VEGA-FIX]
+        printf("[precompile] AMD integrated GPU: 2 threads%c", 10);
+        nthreads = 2;
+    }
+    printf("[precompile] GPU: %s (vendor 0x%04x), pipeline libraries %s%c", g_vk.props.deviceName, (unsigned)g_vk.props.vendorID,
+           g_vk.gpl ? "on" : "off", 10);
+    fflush(stdout);
     if (nthreads < 1) nthreads = 1;
     if (nthreads > 64) nthreads = 64;
     pthread_t th[64], sc[64];
@@ -612,6 +620,12 @@ int vk_precompile_main(const char *root) {
     }
     if (nvar) {  // [XCDE] T240: the whole optimized pipelines (XCDE_PRECOMPILE_PIPELINES=0: pieces only, as before)
         const char *e = getenv("XCDE_PRECOMPILE_PIPELINES");
+        // [VEGA-FIX] AMD integrated GPUs: the driver compiles of whole pipelines are what crashed there - off unless =1
+        bool amd_igpu = g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+        if (amd_igpu && !(e && atoi(e) == 1)) {
+            printf("[precompile] AMD integrated GPU: whole-pipeline precompile skipped (XCDE_PRECOMPILE_PIPELINES=1 to force)%c", 10);
+            e = "0";
+        }
         if (!(e && atoi(e) == 0)) {
             uint64_t tv0 = now_ns();
             for (int i = 0; i < nthreads; i++) pthread_create(&th[i], NULL, var_worker, NULL);
