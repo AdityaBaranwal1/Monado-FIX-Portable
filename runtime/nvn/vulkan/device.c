@@ -1171,6 +1171,15 @@ void backend_present(NvnTexture *t) {
             if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
             if (*p == ',') p++; else break;
         }
+        {   // [GPUPROF-SLOW] XCDE_GPUPROF_SLOW=1: after 4 frames over 1 s in a row, the next frames (at most 4 a run) are profiled as above
+            static int on = -1, done, run;
+            static double prev_t;
+            if (on < 0) on = getenv("XCDE_GPUPROF_SLOW") != NULL;
+            double t = SDL_GetTicks() / 1000.0;
+            if (prev_t > 0 && t - prev_t > 1.0) run++; else run = 0;  // (loading hitches are single frames: it waits for 4 slow frames in a row)
+            if (on && run >= 4 && done < 4 && !g_gpuprof_frame) { done++; g_gpuprof_frame = true; }
+            prev_t = t;
+        }
     }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)total_frames);
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png

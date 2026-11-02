@@ -974,6 +974,27 @@ static bool wait_ready(_Atomic int *state, void *arg) {
     return atomic_load(state) == 1;
 }
 
+// [PIPE-BUDGET] A draw waits for its pipeline build (above). On a GPU where the driver compiles whole pipelines slowly
+// (AMD integrated: the pipeline libraries are off, see device.c) a big effect needs dozens of new pipelines at once and
+// the render thread waited for all of them: 1 fps and the PC frozen. Per frame, after XCDE_PIPE_WAIT_MS of waiting
+// (default 40 on AMD iGPU, 0 = no limit elsewhere) the draws whose pipeline isn't ready are skipped instead: the
+// workers keep building them and they appear a few frames later. XCDE_PIPE_WAIT_MS=0 gives the old behaviour.
+uint64_t renderer_present_count(void);
+static uint64_t pb_frame, pb_used_ns;
+static bool pipe_wait_over_budget(void) {
+    static int64_t lim_ms = -1;
+    if (lim_ms < 0) {
+        const char *e = getenv("XCDE_PIPE_WAIT_MS");
+        lim_ms = e ? atoi(e) : (g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 40 : 0);
+        if (lim_ms < 0) lim_ms = 0;
+        if (lim_ms) LOG("[vk] pipeline wait budget: %lld ms per frame (XCDE_PIPE_WAIT_MS=0: off)%c", (long long)lim_ms, 10);
+    }
+    if (!lim_ms) return false;
+    uint64_t f = renderer_present_count();
+    if (f != pb_frame) { pb_frame = f; pb_used_ns = 0; }
+    return pb_used_ns >= (uint64_t)lim_ms * 1000000ull;
+}
+
 // ================================================================== state
 typedef struct {
     NvnTexture *color[8];
@@ -5375,7 +5396,9 @@ static void draw_(CmdRec *r, bool indexed) {
         stat_pipe_rebuilt++;
     }
     pp->last_used = renderer_present_count();
-    bool pp_ok = wait_ready(&pp->state, pp);
+    bool pp_ok;
+    if (atomic_load(&pp->state) == 0 && pipe_wait_over_budget()) { pp_ok = false; g_last_wait_ns = 0; }  // [PIPE-BUDGET] (still building: skipped this frame)
+    else { pp_ok = wait_ready(&pp->state, pp); pb_used_ns += g_last_wait_ns; }
     if (g_last_wait_ns > build_wait_min()) build_wait_log(NULL, pp, g_last_wait_ns);
     if ((pp->how & 0x40) && gpl_optimize_on()) { pp->how &= ~0x40; atomic_fetch_add(&pp->jobs, 1); run_job_low(gpl_optimize, pp); }  // [XCDE] T218: a prelinked pipeline's first draw
     if (!pp_ok) {
@@ -5794,7 +5817,8 @@ static void draw_(CmdRec *r, bool indexed) {
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
             size_t l = strlen(gp_label[gp_n - 1]);
-            snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
+            snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx vs %016llx (x2 %u x4 %u)", (unsigned long long)g_cur_fs_hash,
+                     (unsigned long long)(pr ? pr->code[0] : 0), (unsigned)r->x[2], (unsigned)r->x[4]);  // [GPUPROF-SLOW] + the vertex shader and counts
         }
         gp_draws[gp_n - 1]++;
     }
