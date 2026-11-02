@@ -10,7 +10,76 @@
 bool g_vkc_native = true;
 _Thread_local uint32_t g_vkc_samples = 1;
 static VkDevice g_dev;
-void vkc_init(VkDevice dev, bool native) { g_dev = dev; g_vkc_native = native; }
+
+// ---- [XCDE-VK11] Vulkan 1.2 / 1.3 entry points are resolved at run time (vkGetDeviceProcAddr), never imported from vulkan-1.dll.
+// Before: xcde.exe linked vkCmdBeginRendering, vkQueueSubmit2, vkWaitSemaphores, ... statically, so on a Vulkan 1.1 driver Windows
+// refused to start the program ("No se encuentra el punto de entrada ...") before XCDE_VK_LEGACY could do anything.
+static PFN_vkCmdPipelineBarrier2 p_vkCmdPipelineBarrier2;
+static PFN_vkQueueSubmit2 p_vkQueueSubmit2;
+static PFN_vkCmdWriteTimestamp2 p_vkCmdWriteTimestamp2;
+static PFN_vkCmdBindVertexBuffers2 p_vkCmdBindVertexBuffers2;
+static PFN_vkCmdBeginRendering p_vkCmdBeginRendering;
+static PFN_vkCmdEndRendering p_vkCmdEndRendering;
+static PFN_vkWaitSemaphores p_vkWaitSemaphores;
+static PFN_vkGetSemaphoreCounterValue p_vkGetSemaphoreCounterValue;
+static PFN_vkCmdSetCullMode p_vkCmdSetCullMode;
+static PFN_vkCmdSetFrontFace p_vkCmdSetFrontFace;
+static PFN_vkCmdSetPrimitiveTopology p_vkCmdSetPrimitiveTopology;
+static PFN_vkCmdSetDepthTestEnable p_vkCmdSetDepthTestEnable;
+static PFN_vkCmdSetDepthWriteEnable p_vkCmdSetDepthWriteEnable;
+static PFN_vkCmdSetDepthCompareOp p_vkCmdSetDepthCompareOp;
+static PFN_vkCmdSetStencilTestEnable p_vkCmdSetStencilTestEnable;
+static PFN_vkCmdSetStencilOp p_vkCmdSetStencilOp;
+static PFN_vkCmdSetPrimitiveRestartEnable p_vkCmdSetPrimitiveRestartEnable;
+static PFN_vkCmdSetDepthBiasEnable p_vkCmdSetDepthBiasEnable;
+
+static PFN_vkVoidFunction vkc_load(VkDevice dev, const char *core, const char *alt) {
+    PFN_vkVoidFunction f = vkGetDeviceProcAddr(dev, core);
+    return f ? f : (alt ? vkGetDeviceProcAddr(dev, alt) : NULL);
+}
+#define VKC_LOAD(name, alt) p_##name = (PFN_##name)vkc_load(dev, #name, alt)
+
+void vkc_init(VkDevice dev, bool native) {
+    g_dev = dev; g_vkc_native = native;
+    VKC_LOAD(vkCmdPipelineBarrier2, "vkCmdPipelineBarrier2KHR");
+    VKC_LOAD(vkQueueSubmit2, "vkQueueSubmit2KHR");
+    VKC_LOAD(vkCmdWriteTimestamp2, "vkCmdWriteTimestamp2KHR");
+    VKC_LOAD(vkCmdBindVertexBuffers2, "vkCmdBindVertexBuffers2EXT");
+    VKC_LOAD(vkCmdBeginRendering, "vkCmdBeginRenderingKHR");
+    VKC_LOAD(vkCmdEndRendering, "vkCmdEndRenderingKHR");
+    VKC_LOAD(vkWaitSemaphores, "vkWaitSemaphoresKHR");
+    VKC_LOAD(vkGetSemaphoreCounterValue, "vkGetSemaphoreCounterValueKHR");
+    VKC_LOAD(vkCmdSetCullMode, "vkCmdSetCullModeEXT");
+    VKC_LOAD(vkCmdSetFrontFace, "vkCmdSetFrontFaceEXT");
+    VKC_LOAD(vkCmdSetPrimitiveTopology, "vkCmdSetPrimitiveTopologyEXT");
+    VKC_LOAD(vkCmdSetDepthTestEnable, "vkCmdSetDepthTestEnableEXT");
+    VKC_LOAD(vkCmdSetDepthWriteEnable, "vkCmdSetDepthWriteEnableEXT");
+    VKC_LOAD(vkCmdSetDepthCompareOp, "vkCmdSetDepthCompareOpEXT");
+    VKC_LOAD(vkCmdSetStencilTestEnable, "vkCmdSetStencilTestEnableEXT");
+    VKC_LOAD(vkCmdSetStencilOp, "vkCmdSetStencilOpEXT");
+    VKC_LOAD(vkCmdSetPrimitiveRestartEnable, "vkCmdSetPrimitiveRestartEnableEXT");
+    VKC_LOAD(vkCmdSetDepthBiasEnable, "vkCmdSetDepthBiasEnableEXT");
+}
+
+// from here on, every direct call in this file goes through the run-time pointers
+#define vkCmdPipelineBarrier2 p_vkCmdPipelineBarrier2
+#define vkQueueSubmit2 p_vkQueueSubmit2
+#define vkCmdWriteTimestamp2 p_vkCmdWriteTimestamp2
+#define vkCmdBindVertexBuffers2 p_vkCmdBindVertexBuffers2
+#define vkCmdBeginRendering p_vkCmdBeginRendering
+#define vkCmdEndRendering p_vkCmdEndRendering
+#define vkWaitSemaphores p_vkWaitSemaphores
+#define vkGetSemaphoreCounterValue p_vkGetSemaphoreCounterValue
+#define vkCmdSetCullMode p_vkCmdSetCullMode
+#define vkCmdSetFrontFace p_vkCmdSetFrontFace
+#define vkCmdSetPrimitiveTopology p_vkCmdSetPrimitiveTopology
+#define vkCmdSetDepthTestEnable p_vkCmdSetDepthTestEnable
+#define vkCmdSetDepthWriteEnable p_vkCmdSetDepthWriteEnable
+#define vkCmdSetDepthCompareOp p_vkCmdSetDepthCompareOp
+#define vkCmdSetStencilTestEnable p_vkCmdSetStencilTestEnable
+#define vkCmdSetStencilOp p_vkCmdSetStencilOp
+#define vkCmdSetPrimitiveRestartEnable p_vkCmdSetPrimitiveRestartEnable
+#define vkCmdSetDepthBiasEnable p_vkCmdSetDepthBiasEnable
 
 // ---- 64-bit stage / access masks -> legacy 32-bit masks
 VkPipelineStageFlags vkc_stage2_to_1(VkPipelineStageFlags2 s, bool is_src) {

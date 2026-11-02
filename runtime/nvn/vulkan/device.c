@@ -422,7 +422,8 @@ static void create_device(void) {
         sc_proxies();
     }
 
-    VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
+    VmaVulkanFunctions vma_fns = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};  // [XCDE-VK11]
+    VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst, .pVulkanFunctions = &vma_fns,
                                  .vulkanApiVersion = g_vk.legacy11 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3,
                                  .flags = budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
