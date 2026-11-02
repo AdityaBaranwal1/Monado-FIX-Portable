@@ -1,4 +1,4 @@
-Hola esta versión de modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
+Hola esta versión se modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
 
 Se basa en el fork: https://github.com/vinitaison/Monado
 Que a su vez se basa en el original de TheMonadoGuy/Monado (Ya lo tumbaron pero recordaremos tu sacrificio)
