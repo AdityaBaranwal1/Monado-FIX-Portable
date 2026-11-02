@@ -11,11 +11,6 @@ extern "C" {
 // in-place reboot while the menu's context lives on): the backend keeps its data in the current context.
 extern "C" bool vk_imgui_backend_init(void) {
     if (ImGui::GetIO().BackendRendererUserData) return true;
-    if (g_vk.legacy11 && g_vk.props.apiVersion < VK_API_VERSION_1_3) {  // (the backend draws with dynamic rendering: a 1.1 GPU has no overlay yet)
-        static int once;
-        if (!once++) LOG("[vk] ImGui overlay off on the Vulkan 1.1 path\n");
-        return false;
-    }
     ImGui_ImplVulkan_InitInfo ii = {};
     ii.ApiVersion = VK_API_VERSION_1_3;
     ii.Instance = g_vk.inst;

@@ -1572,9 +1572,7 @@ static void begin_pass(void) {
     if (g_watch_img && has_d && st.rt.depth && ((TexBackend *)st.rt.depth->backend)->image == g_watch_img) vk_watch(g_watch_img, "begin_pass (depth attachment)");
     for (uint32_t i = 0; i < pass_ncolor; i++) if (g_watch_img && st.rt.color[i] && st.rt.color[i]->backend && ((TexBackend *)st.rt.color[i]->backend)->image == g_watch_img) vk_watch(g_watch_img, "begin_pass (COLOR attachment)");
     pass_mark_attachments();  // [XCDE] T162
-    g_vkc_samples = pass_samples;  // (Vulkan 1.1 path: the render pass needs the sample count; vk_compat.c)
     vkCmdBeginRendering(cb, &ri);
-    g_vkc_samples = 1;
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
     if (oq_counting) oq_begin(cb);  // [XCDE] T139: this pass's samples count toward the open counter

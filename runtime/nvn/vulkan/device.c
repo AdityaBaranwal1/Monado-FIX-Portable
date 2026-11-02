@@ -68,8 +68,7 @@ static void create_instance(void) {
     }
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
-                             .pEngineName = "LARecomp",
-                             .apiVersion = getenv("XCDE_VK_LEGACY") && atoi(getenv("XCDE_VK_LEGACY")) == 2 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3};
+                             .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
@@ -113,21 +112,15 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
-        if (p.apiVersion < VK_API_VERSION_1_1) continue;
+        if (p.apiVersion < VK_API_VERSION_1_3) continue;
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
-        if (p.apiVersion < VK_API_VERSION_1_3) score = 0;  // (a 1.1 / 1.2 device only when nothing newer is there: the Vulkan 1.1 path)
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
-    if (best < 0) FATAL("no Vulkan 1.1 device\n");
+    if (best < 0) FATAL("no Vulkan 1.3 device\n");
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
-    {   // Vulkan 1.1 path: a device without 1.3, or XCDE_VK_LEGACY=2 on any (strict test: instance 1.1, no 1.3 features enabled)
-        const char *lg = getenv("XCDE_VK_LEGACY");
-        g_vk.legacy11 = g_vk.props.apiVersion < VK_API_VERSION_1_3 || (lg && atoi(lg) == 2);
-        if (g_vk.legacy11) LOG("[vk] Vulkan 1.1 path: device without the 1.3 features enabled (render passes, v1 barriers, pipeline variants, KHR semaphores)%c", 10);
-    }
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
@@ -235,24 +228,7 @@ static void create_device(void) {
             (int)gp.graphicsPipelineLibraryFastLinking);
     }
     if (gpl) { ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME; ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME; }
-    if (g_vk.legacy11) gpl = false;
     g_vk.gpl = gpl;
-    // Vulkan 1.1 path: the extensions standing in for what 1.2 / 1.3 made core (only the ones the device has)
-    bool l11_f16i8 = false, l11_8bit = false, l11_16bit = false, l11_scalar = false, l11_timeline = false, l11_subgroup = false;
-    if (g_vk.legacy11) {
-#define L11(var, name) do { var = has_ext(ep, ne, name); if (var) ext[n_ext++] = name; } while (0)
-        L11(l11_timeline, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-        L11(l11_f16i8, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
-        L11(l11_8bit, VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
-        L11(l11_16bit, VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
-        L11(l11_scalar, VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
-        L11(l11_subgroup, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-        bool tmp;
-        L11(tmp, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
-        L11(tmp, VK_KHR_MAINTENANCE_3_EXTENSION_NAME);  // (descriptor / buffer size limits some drivers query through it)
-#undef L11
-        if (!l11_timeline) FATAL("the Vulkan 1.1 path needs VK_KHR_timeline_semaphore\n");
-    }
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -260,17 +236,8 @@ static void create_device(void) {
     // [XCDE] FSR 3 (temporal.c): its shaders use half floats and, on AMD, wave64 compute where the device has them
     VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = robust2 ? &r2have : NULL};
     VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = g_vk.legacy11 ? (robust2 ? (void *)&r2have : NULL) : (void *)&h12};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h12};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
-    VkPhysicalDeviceShaderFloat16Int8Features l11_h16 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
-    VkPhysicalDeviceSubgroupSizeControlFeatures l11_hsg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES};
-    if (g_vk.legacy11) {  // (the same question, asked with the extension structs)
-        if (l11_f16i8) { VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &l11_h16}; vkGetPhysicalDeviceFeatures2(g_vk.phys, &q); }
-        if (l11_subgroup) { VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &l11_hsg}; vkGetPhysicalDeviceFeatures2(g_vk.phys, &q); }
-        h12.shaderFloat16 = l11_h16.shaderFloat16;
-        h13.subgroupSizeControl = l11_hsg.subgroupSizeControl;
-        h13.computeFullSubgroups = l11_hsg.computeFullSubgroups;
-    }
     VkPhysicalDeviceRobustness2FeaturesEXT r2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
                                                  .robustBufferAccess2 = r2have.robustBufferAccess2 && have.features.robustBufferAccess};
     g_vk.robust2 = r2.robustBufferAccess2;
@@ -291,7 +258,7 @@ static void create_device(void) {
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .shaderFloat16 = h12.shaderFloat16, .pNext = &f13,
                                             .samplerFilterMinmax = h12.samplerFilterMinmax};  // [XCDE] NVN reduction filters
-    g_vk.minmax = h12.samplerFilterMinmax;  // (the 1.1 path: false, VK_EXT_sampler_filter_minmax isn't enabled)
+    g_vk.minmax = h12.samplerFilterMinmax;
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
                                                                .graphicsPipelineLibrary = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
@@ -301,26 +268,6 @@ static void create_device(void) {
     if (g_vk.robust2) { r2.pNext = fault ? (void *)&ff : (void *)&f11; }
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                                    .pNext = g_vk.robust2 ? (void *)&r2 : fault ? (void *)&ff : (void *)&f11};
-    // Vulkan 1.1 path: the chain is made of the extension structs (VkPhysicalDeviceVulkan12/13Features don't exist for a 1.1 device)
-    VkPhysicalDeviceTimelineSemaphoreFeatures l11_tl = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE};
-    VkPhysicalDeviceShaderFloat16Int8Features l11_f16 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
-                                                         .shaderFloat16 = l11_h16.shaderFloat16, .shaderInt8 = l11_f16i8};
-    VkPhysicalDevice8BitStorageFeatures l11_s8 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
-                                                  .storageBuffer8BitAccess = l11_8bit, .uniformAndStorageBuffer8BitAccess = l11_8bit};
-    VkPhysicalDevice16BitStorageFeatures l11_s16 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES, .storageBuffer16BitAccess = l11_16bit};
-    VkPhysicalDeviceScalarBlockLayoutFeatures l11_sbl = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES, .scalarBlockLayout = l11_scalar};
-    VkPhysicalDeviceSubgroupSizeControlFeatures l11_sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
-                                                          .subgroupSizeControl = l11_hsg.subgroupSizeControl, .computeFullSubgroups = l11_hsg.computeFullSubgroups};
-    if (g_vk.legacy11) {
-        void *tail = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL;
-#define L11CHAIN(s, on) do { if (on) { (s).pNext = tail; tail = &(s); } } while (0)
-        L11CHAIN(l11_tl, 1); L11CHAIN(l11_f16, l11_f16i8); L11CHAIN(l11_s8, l11_8bit); L11CHAIN(l11_s16, l11_16bit);
-        L11CHAIN(l11_sbl, l11_scalar); L11CHAIN(l11_sg, l11_subgroup);
-#undef L11CHAIN
-        if (g_vk.robust2) { r2.pNext = fault ? (void *)&ff : tail; ff.pNext = tail; }
-        else if (fault) ff.pNext = tail;
-        f.pNext = g_vk.robust2 ? (void *)&r2 : fault ? (void *)&ff : tail;
-    }
     LOG("[vk] robustBufferAccess2: %s\n", g_vk.robust2 ? "on" : "not available");
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
@@ -350,7 +297,7 @@ static void create_device(void) {
     {
         extern void dlss_device_requirements(const char **ext, uint32_t *n, uint32_t max, VkPhysicalDeviceVulkan12Features *f12,
                                              VkPhysicalDeviceVulkan13Features *f13, uint32_t *extra_gfx, uint32_t *extra_compute);
-        if (!g_vk.legacy11) dlss_device_requirements(ext, &n_ext, 48, &f12, &f13, &extra_g, &extra_c);
+        dlss_device_requirements(ext, &n_ext, 48, &f12, &f13, &extra_g, &extra_c);
     }
     // Queues: ours (index 0 of qfam), Streamline's after it in the same family, and [XCDE] FSR 3 frame generation's
     // present / image-acquire / async-compute queues (temporal.c), picked as AMD's sample does: each from a family
@@ -406,13 +353,6 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
-    {   // Vulkan 1.1 path (vk_compat.c). XCDE_VK_LEGACY=1 forces it on a 1.3 GPU: to test it on a desktop before a phone.
-        const char *lg = getenv("XCDE_VK_LEGACY");
-        bool legacy = g_vk.legacy11 || (lg && atoi(lg) != 0);
-        vkc_init(g_vk.dev, !legacy);
-        if (g_vk.legacy11) vkc_use_khr_semaphores(g_vk.dev);
-        if (legacy) LOG("[vk] legacy Vulkan 1.1 path ON (render passes, v1 barriers, pipeline variants)%c", 10);
-    }
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     for (int k = 0; k < 3; k++)
         if (g_vk.fg_fam[k] != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, g_vk.fg_fam[k], g_vk.fg_idx[k], &g_vk.fg_queue[k]);
@@ -422,9 +362,8 @@ static void create_device(void) {
         sc_proxies();
     }
 
-    VmaVulkanFunctions vma_fns = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};  // [XCDE-VK11]
-    VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst, .pVulkanFunctions = &vma_fns,
-                                 .vulkanApiVersion = g_vk.legacy11 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3,
+    VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
+                                 .vulkanApiVersion = VK_API_VERSION_1_3,
                                  .flags = budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
