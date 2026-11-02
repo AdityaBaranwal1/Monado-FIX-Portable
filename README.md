@@ -1,11 +1,12 @@
-Hola esta versión de modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
+# Inicio
+Hola esta versión se modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
 
 Se basa en el fork: https://github.com/vinitaison/Monado
 Que a su vez se basa en el original de TheMonadoGuy/Monado (Ya lo tumbaron pero recordaremos tu sacrificio)
 
 -----------------------------------------------------------------------------------------------------
 
-AVISO:
+# AVISO:
 Para poder usarlo hay que instalar GIT (se supone si lo quieres construir tu sino puedes descargar el PORTABLE y creo que no depende de GIT no lo e testeado)
 
 Tener 7zip instalado (Para descomprimir): https://www.7-zip.org/
@@ -20,7 +21,7 @@ NO SE UTILIZA LOS ARCHIVOS NSP NI NADA DE ESO EN CAMBIO SE UTILIZAN LOS DATOS DE
 
 -----------------------------------------------------------------------------------------------------
 
-NOTA:
+# NOTA:
 Si descargas la versión portable pon tu Exefs y Romfs en la carpeta /targets.
 
 Si es la versión Normal Lo que se ocupa son tus Exefs y Romfs de tu juego con la actualización (asegúrate que ryujinx detecte el juego y la actualización para este paso) Después se copia tu Exefs y Romfs (lo guardan en la carpeta que ustedes quieran) Después ya podemos proseguir con los siguientes pasos:
