@@ -52,6 +52,7 @@ NOTA: NECESITAS IGUALMENTE TUS EXEFS Y ROMFS.
 
 Pasos:
 1.- Copiar tus Exefs y Romfs extraídos en la carpeta /targets/Romfs y /targets/Exefs dentro del port.
+
 2.- Inicia el juego y espera a que compilen los shaders y listo xd.
 
 -----------------------------------------------------------------------------------------------------
