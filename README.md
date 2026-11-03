@@ -34,7 +34,7 @@ Si tienen la versión portable y MUCHO MAS FACIL xd.
 
 -----------------------------------------------------------------------------------------------------
 
-1.- La versión de Xenoblade-PORT-fixAMD-vk1.1&vk1.3+portable.zip (necesita COMPILAR) esta tiene todo vacío así que en esta tendrás que descargar las librerías (se descargan solas) y instalar GIT es muy importante sino no iniciara.
+1.- La versión de COMPILAR.zip (necesita COMPILAR) esta tiene todo vacío así que en esta tendrás que descargar las librerías (se descargan solas) y instalar GIT es muy importante sino no iniciara.
 GIT: https://git-scm.com/install/windows
 
 Pasos:
@@ -46,7 +46,7 @@ Pasos:
 
 -----------------------------------------------------------------------------------------------------
 
-2.- LA MEJOR VERSION VAMOSSS!!! es Xde-Portable-V1.zip (SIN COMPILAR NADA ES DIRECTO)
+2.- LA MEJOR VERSION VAMOSSS!!! es Xde-Portable.zip (SIN COMPILAR NADA ES DIRECTO)
 Esta versión ya esta COMPILADA desde mi pc y hecha para poner en hasta una USB (se supone xd) en esta versión ya le agregue los dos accesos a vk1.1 y vk1.3 si lo compilan con el método anterior les crea solo un play monado pero creo que detecta automáticamente el vulkan de tu PC. Pero yo agrege ya los accesos directos y todo integrado y sus DLL si no inicia prueba instalando GIT.
 
 NOTA: NECESITAS IGUALMENTE TUS EXEFS Y ROMFS.
@@ -60,8 +60,9 @@ Pasos:
 Gracias por leerlo se que da hueva pero que se le hará xd.
 Este fork lo hice yo Ivan Prestef2 estuve testeando y probándolo espero que lo disfrutes también visita mi canal de YouTube para ver mis videos xd.
 
+------------------------------------------------------------------------------------------------------
 
-
+#Proyecto ORIGINAL
 
 # Monado
 
