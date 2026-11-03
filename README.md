@@ -1,6 +1,6 @@
 # ATENCION
-Se recomienda graficas NVIDIA otras graficas pueden sufrir muchos fallos o cerrarse se intento solucionar en AMD pero no dispongo de conocimientos para eso.
-# Si tienes AMD mejor emulalo en ryujinx y ya xd.
+Se está encontrando la solución al crash de AMD y los bajones de fps. (resulta que son ciertos shaders pesados que hacen que falle) el proyecto original ya ofrecía una opción para omitir esos shaders aunque se necesita tiempo y testing para probar todos los shaders que causan problemas y omitirlos (el lag principal está resuelto)
+La actualización v5 se publicará con estas mejoras y ya seré feliz xd
 
 # Inicio
 Hola esta versión se modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
