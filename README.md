@@ -1,3 +1,7 @@
+# ATENCION
+Se recomienda graficas NVIDIA otras graficas pueden sufrir muchos fallos o cerrarse se intento solucionar en AMD pero no dispongo de conocimientos para eso.
+# Si tienes AMD mejor emulalo en ryujinx y ya xd.
+
 # Inicio
 Hola esta versión se modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
 
