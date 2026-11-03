@@ -1,6 +1,8 @@
 # ATENCION
-Se está encontrando la solución al crash de AMD y los bajones de fps. (resulta que son ciertos shaders pesados que hacen que falle) el proyecto original ya ofrecía una opción para omitir esos shaders aunque se necesita tiempo y testing para probar todos los shaders que causan problemas y omitirlos (el lag principal está resuelto)
-La actualización v5 se publicará con estas mejoras y ya seré feliz xd
+Se está encontrando la solución al crash de AMD y los bajones de fps. (resulta que son ciertos shaders pesados que hacen que falle) el proyecto original ya ofrecía una opción para omitir esos shaders aunque se necesita tiempo y testing para probar todos los shaders que causan problemas y omitirlos (el lag principal está resuelto).
+La actualización v5 se publicará con estas mejoras y ya seré feliz xd.
+
+# Si tienen algun error favor de ponerlo en la pestaña ISSUES para ver si se puede corregir.
 
 # Inicio
 Hola esta versión se modifico gracias a Claudio (el trabajo original ya esta hecho casi en su totalidad por una IA pero le e puesto mejoras y solucionado errores.
@@ -11,7 +13,7 @@ Que a su vez se basa en el original de TheMonadoGuy/Monado (Ya lo tumbaron pero 
 -----------------------------------------------------------------------------------------------------
 
 # AVISO:
-Para poder usarlo hay que instalar GIT (se supone si lo quieres construir tu sino puedes descargar el PORTABLE y creo que no depende de GIT no lo e testeado)
+Para poder usarlo hay que instalar GIT (se supone si lo quieres construir tu sino puedes descargar el PORTABLE y creo que no depende de GIT no lo e testeado).
 
 Tener 7zip instalado (Para descomprimir): https://www.7-zip.org/
 
