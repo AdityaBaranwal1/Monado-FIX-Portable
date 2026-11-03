@@ -26,12 +26,7 @@ NO SE UTILIZA LOS ARCHIVOS NSP NI NADA DE ESO EN CAMBIO SE UTILIZAN LOS DATOS DE
 -----------------------------------------------------------------------------------------------------
 
 # NOTA:
-Si descargas la versión portable pon tu Exefs y Romfs en la carpeta /targets.
-
-Si es la versión Normal Lo que se ocupa son tus Exefs y Romfs de tu juego con la actualización (asegúrate que ryujinx detecte el juego y la actualización para este paso) Después se copia tu Exefs y Romfs (lo guardan en la carpeta que ustedes quieran) Después ya podemos proseguir con los siguientes pasos:
-
-Si tienen la versión portable y MUCHO MAS FACIL xd.
-
+Si descargas la versión portable pon tu Exefs y Romfs en la carpeta /targets recuerden que debe ser de la version 2.0.0.
 -----------------------------------------------------------------------------------------------------
 
 1.- La versión de COMPILAR.zip (necesita COMPILAR) esta tiene todo vacío así que en esta tendrás que descargar las librerías (se descargan solas) y instalar GIT es muy importante sino no iniciara.
@@ -41,13 +36,13 @@ Pasos:
 1.- Tienen que iniciar el Build Monado.bat lo que hará será instalar todas las dependencias necesarias 5Gb aproximadamente.
 2.- Dentro del .bat les dirán que seleccionen el juego ya extraído su Romfs y su Exefs.
 3.- Una ves terminado el progreso y ya compilado lo pueden iniciar.
-4.- Iniciar Play Monado (cualquiera uno es vulkan 1.1 que aun tiene errores y mucho lag solo utilízalo si tu PC no es compatible con vulkan 1.3 ya que el vulkan 1.3 no tiene errores de graficos y no hay lag ya que no tiene que traducir las llamadas vk1.3 a vk1.1) Ósea en conclusión Vk1.3 y si no sirve el Vk1.1 xd.
-5.- Esperan a que inicie y compile los shaders para que no haya lag (en Vk1.1 va a haber si o si xd).
+4.- Iniciar Play Monado
+5.- Esperan a que inicie y compile los shaders para que no haya lag.
 
 -----------------------------------------------------------------------------------------------------
 
 2.- LA MEJOR VERSION VAMOSSS!!! es Xde-Portable.zip (SIN COMPILAR NADA ES DIRECTO)
-Esta versión ya esta COMPILADA desde mi pc y hecha para poner en hasta una USB (se supone xd) en esta versión ya le agregue los dos accesos a vk1.1 y vk1.3 si lo compilan con el método anterior les crea solo un play monado pero creo que detecta automáticamente el vulkan de tu PC. Pero yo agrege ya los accesos directos y todo integrado y sus DLL si no inicia prueba instalando GIT.
+Esta versión ya esta COMPILADA desde mi pc y hecha para poner en hasta una USB no necesitan nada instalado.
 
 NOTA: NECESITAS IGUALMENTE TUS EXEFS Y ROMFS.
 
