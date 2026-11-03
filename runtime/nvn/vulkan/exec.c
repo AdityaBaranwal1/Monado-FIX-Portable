@@ -981,6 +981,19 @@ static bool wait_ready(_Atomic int *state, void *arg) {
 // workers keep building them and they appear a few frames later. XCDE_PIPE_WAIT_MS=0 gives the old behaviour.
 uint64_t renderer_present_count(void);
 static uint64_t pb_frame, pb_used_ns;
+// [AMD-IGPU-FIX] Three fragment shaders (hashes 53329ef60c533b43, 36580ad1389195c3 -> small 224..360 targets, ~80-120 ms
+// each, and 071492ad778cf10c -> a 1208x680 target, ~1000 ms) are each drawn as a single 36-vertex box (volume effects, only
+// in some areas). On AMD integrated GPUs (Ryzen Vega, Beelink EQR5) they cost ~1.2-1.4 us per pixel and dropped the game
+// from 30 fps to 5 fps or even 0.4 fps (GPU profiles). Skipping them restored 30 fps and the missing effects were not
+// noticeable. Off for everything that is not an AMD integrated GPU. XCDE_AMD_KEEP_HEAVY=1 draws them anyway.
+static int amd_igpu_heavy_skip(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XCDE_AMD_KEEP_HEAVY");
+        v = !(e && atoi(e)) && g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    }
+    return v;
+}
 static bool pipe_wait_over_budget(void) {
     static int64_t lim_ms = -1;
     if (lim_ms < 0) {
@@ -5166,7 +5179,7 @@ static void draw_(CmdRec *r, bool indexed) {
     // item cursor, widescreen backdrop detection) ran here on every draw; XCDE has none of them. The fragment
     // program hash is computed only for the debug switches that use it.
     static int fsh = -1;
-    if (fsh < 0) fsh = getenv("LARECOMP_SKIP_FSHASH") || getenv("LARECOMP_LOG_FSHASH") || getenv("XCDE_WATCH_FS") || ct_on();
+    if (fsh < 0) fsh = getenv("LARECOMP_SKIP_FSHASH") || getenv("LARECOMP_LOG_FSHASH") || getenv("XCDE_WATCH_FS") || ct_on() || amd_igpu_heavy_skip();
     if (fsh || g_settings.dof_off) {  // (depth of field: the F1 menu turns it off and on while playing)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -5181,6 +5194,12 @@ static void draw_(CmdRec *r, bool indexed) {
             for (const char *p = getenv("LARECOMP_SKIP_FSHASH"); p && *p && nskip < 16;) {
                 skip[nskip++] = strtoull(p, (char **)&p, 16);
                 while (*p == ',') p++;
+            }
+            // [AMD-IGPU-FIX] heavy volume effect: see amd_igpu_heavy_skip()
+            if (amd_igpu_heavy_skip()) {
+                static const uint64_t heavy[] = { 0x53329ef60c533b43ull, 0x36580ad1389195c3ull, 0x071492ad778cf10cull };
+                for (size_t h = 0; h < sizeof heavy / sizeof heavy[0] && nskip < 16; h++) skip[nskip++] = heavy[h];
+                LOG("[vk] AMD integrated GPU: %d heavy volume-effect fragment shaders skipped (XCDE_AMD_KEEP_HEAVY=1 keeps them)%c", (int)(sizeof heavy / sizeof heavy[0]), 10);
             }
         }
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { SKIPPED(); return; }

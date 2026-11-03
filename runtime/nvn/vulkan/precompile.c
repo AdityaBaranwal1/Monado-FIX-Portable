@@ -72,6 +72,7 @@ static size_t next_job;
 static bool scan_done, use_libs;
 static _Atomic uint64_t n_named_int;  // [XCDE] T211 (programs built with integer inputs named by the container)
 static _Atomic uint64_t n_built, n_failed, n_extra, files_done, n_controls, next_file;
+static _Atomic int abandon;  // [PRECOMPILE-STALL-FIX] set when a phase gives up: the workers take no new job
 static uint64_t files_total;
 
 // hash -> value + 1 (open addressing; flock held)
@@ -410,6 +411,7 @@ static SeedJob *seed_jobs;
 static size_t nseed;
 static _Atomic size_t next_seed;
 static _Atomic uint64_t n_seed_built;
+static _Atomic size_t n_seed_done;  // [PRECOMPILE-STALL-FIX] seed jobs finished (n_seed_built counts only the successes)
 // [XCDE] T240: and every recorded variant's whole optimized pipeline (exec.c vk_precompile_variant): the shipped list
 // (the debugger tours of every map and cutscene, tools/tour_batch.py) plus the player's own cache/variants.bin
 extern int vk_precompile_variant(const NvnProgram *np, const void *rec, size_t rec_size);
@@ -469,7 +471,7 @@ static void load_seed_file(const char *path, Map *done_) {
 static void *var_worker(void *arg) {
     (void)arg;
     plat_thread_background();
-    for (size_t i; (i = atomic_fetch_add(&next_var, 1)) < nvar;) {
+    for (size_t i; !atomic_load(&abandon) && (i = atomic_fetch_add(&next_var, 1)) < nvar;) {
         VarJob *j = &var_jobs[i];
         NvnProgram np;
         memset(&np, 0, sizeof np);
@@ -484,17 +486,42 @@ static void *var_worker(void *arg) {
 static void *seed_worker(void *arg) {
     (void)arg;
     plat_thread_background();
-    for (size_t i; (i = atomic_fetch_add(&next_seed, 1)) < nseed;) {
+    for (size_t i; !atomic_load(&abandon) && (i = atomic_fetch_add(&next_seed, 1)) < nseed;) {
         SeedJob *j = &seed_jobs[i];
         NvnProgram np;
         memset(&np, 0, sizeof np);
         stage_of(&np, 0, &found[j->vs]);
         if (j->fs != UINT32_MAX) stage_of(&np, 1, &found[j->fs]);
-        if (!job_begin(job_key(j, sizeof *j, 2))) continue;
+        if (!job_begin(job_key(j, sizeof *j, 2))) { atomic_fetch_add(&n_seed_done, 1); continue; }
         if (vk_precompile_program(&np, &j->vkey, &j->fkey, NULL)) atomic_fetch_add(&n_seed_built, 1);
         job_end();
+        atomic_fetch_add(&n_seed_done, 1);
     }
     return NULL;
+}
+
+// [PRECOMPILE-STALL-FIX] A driver call that never returns (NVIDIA / Intel stuck inside a whole-pipeline compile) left
+// this process waiting forever at the launcher's 100 %. The phases now watch their own progress: if no job finished
+// for XCDE_PRECOMPILE_STALL_S seconds (default 120, 0 = never) the run stops the others, keeps what was in flight in
+// cache/precompile_inflight.bin and exits with code 2, so the launcher restarts it by itself (crash-safe, T240) and the
+// new run skips the stuck jobs.
+static bool stalled(const char *phase, uint64_t count) {
+    static char cur[16];
+    static uint64_t lastc, lastt;
+    static int limit_s = -1;
+    if (limit_s < 0) limit_s = getenv("XCDE_PRECOMPILE_STALL_S") ? atoi(getenv("XCDE_PRECOMPILE_STALL_S")) : 120;
+    uint64_t now = now_ns();
+    if (strcmp(cur, phase) || count != lastc) { snprintf(cur, sizeof cur, "%s", phase); lastc = count; lastt = now; return false; }
+    return limit_s > 0 && now - lastt > (uint64_t)limit_s * 1000000000ull;
+}
+static void give_up(const char *phase, uint64_t count) {
+    printf("[precompile] %s: no job finished for a long time (%llu done): a driver call is stuck. Stopping the others; the stuck jobs go to the skip list and the run restarts%c", phase, (unsigned long long)count, 10);
+    fflush(stdout);
+    atomic_store(&abandon, 1);
+    struct timespec ts = {3, 0};
+    nanosleep(&ts, NULL);  // (the others finish the job they are on and stop: what stays in the file is what is stuck)
+    if (inflight) fflush(inflight);
+    _exit(2);
 }
 
 static void *worker(void *arg) {
@@ -503,7 +530,7 @@ static void *worker(void *arg) {
     for (;;) {
         pthread_mutex_lock(&flock);
         while (next_job >= nprogs && !scan_done) pthread_cond_wait(&fcond, &flock);
-        if (next_job >= nprogs) { pthread_mutex_unlock(&flock); return NULL; }
+        if (next_job >= nprogs || atomic_load(&abandon)) { pthread_mutex_unlock(&flock); return NULL; }
         Pair pr = progs[next_job++];
         Found vs = found[pr.vs], fs = pr.fs != UINT32_MAX ? found[pr.fs] : (Found){0};
         pthread_mutex_unlock(&flock);
@@ -526,10 +553,11 @@ static void progress(const char *phase, bool force) {
     uint64_t now = now_ns();
     if (!force && now - last < 200000000ull) return;
     last = now;
-    uint64_t done = n_built + n_failed;
+    uint64_t done = n_built + n_failed, fd = files_done, ft = files_total, found_n = nprogs;
+    if (!strcmp(phase, "pipelines")) { fd = n_var_built + n_var_failed; ft = found_n = nvar; done = fd; }  // [PRECOMPILE-STALL-FIX]
     FILE *f = fopen("cache/precompile_progress.tmp", "w");
     if (f) {
-        fprintf(f, "%s %llu %llu %zu %llu%c", phase, (unsigned long long)files_done, (unsigned long long)files_total, nprogs,
+        fprintf(f, "%s %llu %llu %llu %llu%c", phase, (unsigned long long)fd, (unsigned long long)ft, (unsigned long long)found_n,
                 (unsigned long long)done, 10);
         fclose(f);
         remove("cache/precompile_progress.txt");
@@ -605,6 +633,7 @@ int vk_precompile_main(const char *root) {
     pthread_cond_broadcast(&fcond);
     pthread_mutex_unlock(&flock);
     while (n_built + n_failed < nprogs) {
+        if (stalled("build", n_built + n_failed)) give_up("build", n_built + n_failed);
         progress("build", false);
         struct timespec ts = {0, 100000000};
         nanosleep(&ts, NULL);
@@ -614,7 +643,10 @@ int vk_precompile_main(const char *root) {
     if (nseed) {
         uint64_t ts0 = now_ns();
         for (int i = 0; i < nthreads; i++) pthread_create(&th[i], NULL, seed_worker, NULL);
-        while (atomic_load(&next_seed) < nseed) { progress("seed", false); struct timespec ts = {0, 100000000}; nanosleep(&ts, NULL); }
+        while (atomic_load(&n_seed_done) < nseed) {
+            if (stalled("seed", atomic_load(&n_seed_done))) give_up("seed", atomic_load(&n_seed_done));
+            progress("seed", false); struct timespec ts = {0, 100000000}; nanosleep(&ts, NULL);
+        }
         for (int i = 0; i < nthreads; i++) pthread_join(th[i], NULL);
         printf("[precompile] seed: %zu variants, %llu built in %.1f s%c", nseed, (unsigned long long)n_seed_built, (now_ns() - ts0) / 1e9, 10);
     }
@@ -629,13 +661,14 @@ int vk_precompile_main(const char *root) {
         if (!(e && atoi(e) == 0)) {
             uint64_t tv0 = now_ns();
             for (int i = 0; i < nthreads; i++) pthread_create(&th[i], NULL, var_worker, NULL);
-            while (atomic_load(&next_var) < nvar) {
+            while (atomic_load(&next_var) < nvar || n_var_built + n_var_failed < nvar) {
                 static uint64_t lastp;
                 if (now_ns() - lastp > 2000000000ull) {
                     lastp = now_ns();
                     printf("[precompile] pipelines: %llu/%zu%c", (unsigned long long)(n_var_built + n_var_failed), nvar, 10);
                     fflush(stdout);
                 }
+                if (stalled("pipelines", n_var_built + n_var_failed)) give_up("pipelines", n_var_built + n_var_failed);
                 progress("pipelines", false);
                 struct timespec ts = {0, 100000000};
                 nanosleep(&ts, NULL);

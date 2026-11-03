@@ -293,6 +293,8 @@ static const char *const k_en[][2] = {
     {"Listo. Guardado: save/   Ajustes: xcde.ini", "Ready. Saves: save/   Settings: xcde.ini"},
     {"Listo. La primera vez, JUGAR prepara los shaders antes (unos minutos)", "Ready. The first time, PLAY prepares the shaders first (a few minutes)"},
     {"Omitir", "Skip"}, {"Detener", "Stop"},
+    {"Paso final: pipelines completos %llu de %llu (puedes pulsar Omitir: el juego los compila al jugar)",
+     "Final pass: whole pipelines %llu of %llu (you can press Skip: the game compiles them while playing)"},
     {"Precompilación detenida (se puede seguir otro día: lo ya hecho se conserva)", "Precompilation stopped (it can go on another day: what's done is kept)"},
     {"JUGAR", "PLAY"}, {"Precompilar shaders", "Precompile shaders"},
     {"Traduce y compila todos los shaders del juego por adelantado, para que la primera visita\n"
@@ -562,7 +564,10 @@ static void pc_poll() {
             float fs = (float)fd / (float)ft, fc = found ? (float)done / (float)found : 0.0f;
             g_pc_frac = 0.15f * fs + 0.85f * fs * fc;
             char t[160];
-            if (!strcmp(phase, "seed")) snprintf(t, sizeof t, "%s", T("Variantes conocidas (semilla)…"));  // [XCDE] T211: the seed pass
+            if (!strcmp(phase, "pipelines")) {  // [PRECOMPILE-STALL-FIX] the last pass (whole pipelines) has its own count: the bar was stuck at 100 % while it ran
+                g_pc_frac = fs;
+                snprintf(t, sizeof t, T("Paso final: pipelines completos %llu de %llu (puedes pulsar Omitir: el juego los compila al jugar)"), fd, ft);
+            } else if (!strcmp(phase, "seed")) snprintf(t, sizeof t, "%s", T("Variantes conocidas (semilla)…"));  // [XCDE] T211: the seed pass
             else snprintf(t, sizeof t, T("Archivos %llu de %llu · programas de shaders listos %llu de %llu"), fd, ft, done, found);
             g_pc_text = t;
         }

@@ -3,6 +3,7 @@
 // A command handle is the guest address of a list's first record.
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "nvn.h"
 #include "../env_cache.h"  // (last: cached getenv)
@@ -56,12 +57,51 @@ NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); 
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
 NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 
+// [CMD-OVERFLOW-FIX] Our CmdRec records are 80+ bytes each, several times what the same call costs in the Switch's own
+// command encoding, so a very heavy scene (a DLC boss: ~470k draws per 2 s) can need more command memory than the game
+// budgeted for its callback to hand out: the callback adds nothing (or too little) and the old code died with "FATAL: nvn:
+// out of command memory" (NVIDIA RTX 4050 and AMD Vega alike). Instead of dying, record into a host chunk and chain it
+// with CMD_JUMP, like a chunk the game added itself. The game never frees these, and the render worker may still be
+// replaying a list when its command buffer is recorded again, so chunks live in a ring and the oldest one is freed only
+// when the ring is over its cap (~0.5 s of the worst case, far longer than the render worker lags).
+#define OVF_CHUNK (4u << 20)
+#define OVF_RING 64
+static pthread_mutex_t ovf_lock = PTHREAD_MUTEX_INITIALIZER;
+static void *ovf_ring[OVF_RING];
+static unsigned ovf_next, ovf_total;
+
+static bool overflow_chunk(NvnCmdBuf *cb, uint32_t need) {
+    uint64_t bytes = OVF_CHUNK;
+    while (bytes < (uint64_t)need + JUMP_RESERVE) bytes *= 2;
+    void *m = calloc(1, (size_t)bytes);
+    if (!m) return false;
+    pthread_mutex_lock(&ovf_lock);
+    unsigned slot = ovf_next++ % OVF_RING;
+    free(ovf_ring[slot]);  // the chunk from OVF_RING allocations ago
+    ovf_ring[slot] = m;
+    unsigned n = ++ovf_total;
+    pthread_mutex_unlock(&ovf_lock);
+    if (n == 1 || (n & (n - 1)) == 0)
+        LOG("[nvn] command memory ran out (game callback %s): recording into host overflow chunks (%u so far, 4 MB each)\n", cb->callback ? "gave none" : "missing", n);
+    if (cb->recording && cb->mem) {
+        CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
+        j->x[0] = (uint64_t)(uintptr_t)m;
+    }
+    cb->mem = (uint64_t)(uintptr_t)m;
+    cb->size = bytes;
+    cb->used = 0;
+    return true;
+}
+
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
-        if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
+        if (!cb->callback || tries == 2) {  // [CMD-OVERFLOW-FIX] no (more) guest memory: use a host chunk, die only if that fails too
+            if (overflow_chunk(cb, size)) continue;
+            FATAL("nvn: out of command memory (need %u)\n", size);
+        }
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = cb->guest;
