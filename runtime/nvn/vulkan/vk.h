@@ -29,8 +29,10 @@ typedef struct {
     VkDevice dev;
     VkQueue queue;
     uint32_t qfam;
+    uint32_t phys_index;  // index from vkEnumeratePhysicalDevices, for diagnostics and manual selection
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
+    VkPhysicalDeviceDriverProperties driver_props;
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only

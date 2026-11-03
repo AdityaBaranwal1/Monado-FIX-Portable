@@ -168,6 +168,15 @@ static const char *const k_en[][2] = {
     {"Volumen", "Volume"}, {"Audio de los vídeos (al reiniciar)", "Video sound (after a restart)"}, {"Controles", "Controls"},
     {"La asignación de teclas y botones se cambia en el launcher (Play Monado.bat), pestaña Controles.",
      "Keys and buttons are remapped in the launcher, Controls tab."},
+    {"GPU / Vulkan", "GPU / Vulkan"}, {"Adaptador Vulkan activo", "Active Vulkan adapter"},
+    {"Índice de GPU (-1 = automático)", "GPU index (-1 = automatic)"},
+    {"Perfil gráfico", "Graphics profile"}, {"Automático (recomendado)", "Automatic (recommended)"},
+    {"Compatibilidad (desactiva rutas opcionales rápidas)", "Compatibility (disables optional fast paths)"},
+    {"Bibliotecas de pipelines", "Pipeline libraries"}, {"Según el controlador", "Driver default"},
+    {"Desactivadas", "Disabled"}, {"Activadas si son compatibles", "Enabled when supported"},
+    {"Presupuesto de memoria Vulkan", "Vulkan memory budget"},
+    {"Estos cambios requieren reiniciar el juego.", "These changes require restarting the game."},
+    {"Memoria local reportada", "Reported local memory"}, {"Memoria compartida / no local", "Shared / non-local memory"},
     {"Guardar", "Save"}, {"Volver al juego", "Back to the game"}, {"Guardado en xcde.ini", "Saved to xcde.ini"},
 };
 static const char *T(const char *es) {
@@ -228,6 +237,68 @@ static void ui(void) {
             for (int i = 0; i < 6; i++) if (fpsv[i] == g_settings.fps) fi = i;
             if (ImGui::Combo(T("FPS (al reiniciar)"), &fi, TL(fpsu, 6).p, 6)) g_settings.fps = fpsv[fi];
             if (ImGui::Checkbox(T("V-Sync (con 30 / 60 FPS)"), &g_settings.vsync)) vk_request_swapchain_recreate();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(T("GPU / Vulkan"))) {
+            ImGui::SeparatorText(T("Adaptador Vulkan activo"));
+            ImGui::TextWrapped("%s", g_vk.props.deviceName);
+            const char *vendor = g_vk.props.vendorID == 0x1002 ? "AMD" : g_vk.props.vendorID == 0x10de ? "NVIDIA" :
+                                 g_vk.props.vendorID == 0x8086 ? "Intel" : "Unknown";
+            ImGui::Text("%s | vendor 0x%04x | device 0x%04x", vendor, g_vk.props.vendorID, g_vk.props.deviceID);
+            ImGui::TextWrapped("Driver %u: %s (%s)", g_vk.props.driverVersion,
+                               g_vk.driver_props.driverName, g_vk.driver_props.driverInfo);
+            ImGui::Text("Vulkan %u.%u.%u | adapter index %u", VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
+                        VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.phys_index);
+            VkPhysicalDeviceMemoryProperties mp{};
+            vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+            VkDeviceSize local = 0, shared = 0;
+            for (uint32_t i = 0; i < mp.memoryHeapCount; ++i) {
+                bool host_visible = false;
+                for (uint32_t t = 0; t < mp.memoryTypeCount; ++t)
+                    if (mp.memoryTypes[t].heapIndex == i && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                        host_visible = true;
+                if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && !host_visible) local += mp.memoryHeaps[i].size;
+                else shared += mp.memoryHeaps[i].size;
+            }
+            ImGui::Text("%s: %.0f MiB", T("Memoria local reportada"), (double)local / (1024.0 * 1024.0));
+            ImGui::Text("%s: %.0f MiB", T("Memoria compartida / no local"), (double)shared / (1024.0 * 1024.0));
+            if (g_vk.vma) {
+                VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+                vmaGetHeapBudgets(g_vk.vma, budgets);
+                ImGui::SeparatorText(T("Presupuesto de memoria (VMA / controlador)"));
+                for (uint32_t i = 0; i < mp.memoryHeapCount; ++i) {
+                    const double used_mb = (double)budgets[i].usage / (1024.0 * 1024.0);
+                    const double budget_mb = (double)budgets[i].budget / (1024.0 * 1024.0);
+                    const double ours_mb = (double)budgets[i].statistics.allocationBytes / (1024.0 * 1024.0);
+                    if (budget_mb > 0.0) {
+                        ImGui::Text("Heap %u%s: %.0f / %.0f MiB | Monado: %.0f MiB", i,
+                                    (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? " (local)" : " (host)",
+                                    used_mb, budget_mb, ours_mb);
+                        const float pressure = (float)(budgets[i].usage / (double)budgets[i].budget);
+                        ImGui::ProgressBar(pressure < 0.0f ? 0.0f : pressure > 1.0f ? 1.0f : pressure,
+                                           ImVec2(-1.0f, 0.0f), "");
+                    } else {
+                        ImGui::Text("Heap %u: presupuesto no disponible | Monado: %.0f MiB", i, ours_mb);
+                    }
+                }
+            }
+            if (g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+                ImGui::TextWrapped(T("GPU integrada: la memoria del sistema es compartida; el tamaño del heap Vulkan no equivale a VRAM dedicada."));
+            ImGui::SeparatorText(T("Selección y compatibilidad (al reiniciar)"));
+            ImGui::SetNextItemWidth(180.0f);
+            ImGui::InputInt(T("Índice de GPU (-1 = automático)"), &g_settings.gpu_index);
+            if (g_settings.gpu_index < -1) g_settings.gpu_index = -1;
+            if (g_settings.gpu_index > 255) g_settings.gpu_index = 255;
+            static const char *profiles[] = {"Automático (recomendado)", "Compatibilidad (desactiva rutas opcionales rápidas)"};
+            int profile = g_settings.gpu_profile == GPU_PROFILE_COMPATIBILITY ? 1 : 0;
+            if (ImGui::Combo(T("Perfil gráfico"), &profile, TL(profiles, 2).p, 2))
+                g_settings.gpu_profile = profile ? GPU_PROFILE_COMPATIBILITY : GPU_PROFILE_AUTO;
+            static const char *gpl_modes[] = {"Según el controlador", "Desactivadas", "Activadas si son compatibles"};
+            int gpl = g_settings.gpu_gpl == GPU_GPL_OFF ? 1 : g_settings.gpu_gpl == GPU_GPL_ON ? 2 : 0;
+            if (ImGui::Combo(T("Bibliotecas de pipelines"), &gpl, TL(gpl_modes, 3).p, 3))
+                g_settings.gpu_gpl = gpl == 1 ? GPU_GPL_OFF : gpl == 2 ? GPU_GPL_ON : GPU_GPL_AUTO;
+            ImGui::Checkbox(T("Presupuesto de memoria Vulkan"), &g_settings.gpu_memory_budget);
+            ImGui::TextDisabled(T("Estos cambios requieren reiniciar el juego."));
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(T("Audio"))) {

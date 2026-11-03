@@ -21,6 +21,9 @@ enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
 // host locale ($LC_ALL / $LC_MESSAGES / $LANG); the rest are the codes of the languages the game has text for.
 enum { LANG_AUTO = 0, N_LANGUAGES = 12 };
+// Vulkan device policy: automatic chooses the best usable adapter; compatibility disables optional fast paths.
+enum { GPU_PROFILE_AUTO = 0, GPU_PROFILE_COMPATIBILITY = 1 };
+enum { GPU_GPL_AUTO = -1, GPU_GPL_OFF = 0, GPU_GPL_ON = 1 };
 extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
 extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
 
@@ -69,6 +72,10 @@ typedef struct {
     int ui_lang;         // [XCDE] launcher and F1-menu language: 0 Spanish, 1 English (xcde.ini launcher_lang = es | en)
     int stick_deadzone;  // [XCDE] % of the stick's travel read as centred (xcde.ini stick_deadzone = 0-30, default 0: raw)
     int cutscene_mode;   // [XCDE] T224: 0 cutscenes at the FPS setting, 1 at 30, 2 at 30 + FSR 3 frame generation (xcde.ini cutscenes = same|30|30fg)
+    int gpu_index;       // Vulkan enumerated physical-device index; -1 = automatic (restart required)
+    int gpu_profile;     // GPU_PROFILE_*; compatibility disables optional pipeline-library, host-import and frame-generation paths
+    int gpu_gpl;         // GPU_GPL_*; explicit graphics-pipeline-library override, restart required
+    bool gpu_memory_budget; // use VK_EXT_memory_budget when exposed; informational allocator support
 } Settings;
 
 enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };

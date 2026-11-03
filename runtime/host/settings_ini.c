@@ -11,7 +11,7 @@
 const char *const g_language_codes[N_LANGUAGES] = {"", "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "French", "German", "Italian", "Spanish",
                                                    "Chinese", "Korean", "Dutch", "Portuguese", "Russian"};
-Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_QUALITY, .game_blur = true, .vsync = true, .ui_lang = 1};
+Settings g_settings = {.fps = 30, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_BILINEAR, .upscale_quality = UQ_QUALITY, .game_blur = true, .vsync = true, .ui_lang = 1, .gpu_index = -1, .gpu_profile = GPU_PROFILE_AUTO, .gpu_gpl = GPU_GPL_AUTO, .gpu_memory_budget = true};
 int g_window_w = 1280, g_window_h = 720;  // windowed size (settings.h)
 
 // [XCDE] Mods (runtime/services/romfs_virtual.c): xcde.ini `mod_<folder> = 0/1`; a folder not listed is on.
@@ -80,6 +80,10 @@ void settings_load(void) {
             for (int i = 0; i < 5; i++) if (!strcmp(v, q[i])) g_settings.upscale_quality = i;
         } else if (!strcmp(k, "frame_gen")) g_settings.frame_gen = atoi(v) != 0;
         else if (!strcmp(k, "cutscenes")) g_settings.cutscene_mode = !strcmp(v, "30") ? 1 : !strcmp(v, "30fg") ? 2 : 0;
+        else if (!strcmp(k, "gpu_index")) { int n = atoi(v); g_settings.gpu_index = n < -1 ? -1 : n > 255 ? 255 : n; }
+        else if (!strcmp(k, "gpu_profile")) g_settings.gpu_profile = !strcmp(v, "compatibility") ? GPU_PROFILE_COMPATIBILITY : GPU_PROFILE_AUTO;
+        else if (!strcmp(k, "gpu_gpl")) g_settings.gpu_gpl = !strcmp(v, "on") ? GPU_GPL_ON : !strcmp(v, "off") ? GPU_GPL_OFF : GPU_GPL_AUTO;
+        else if (!strcmp(k, "gpu_memory_budget")) g_settings.gpu_memory_budget = atoi(v) != 0;
         else if (!strcmp(k, "antialias")) g_settings.antialias = !strcmp(v, "smaa") ? AA_SMAA : AA_OFF;
         else if (!strcmp(k, "depth_of_field")) g_settings.dof_off = atoi(v) == 0;
         else if (!strcmp(k, "game_blur")) g_settings.game_blur = atoi(v) != 0;
@@ -122,6 +126,10 @@ void settings_save(void) {
     if (g_settings.stick_deadzone) fprintf(f, "stick_deadzone = %d\n", g_settings.stick_deadzone);
     fprintf(f, "launcher_lang = %s\n", g_settings.ui_lang ? "en" : "es");  // (the launcher's key: kept when the game saves)
     fprintf(f, "cutscenes = %s\n", g_settings.cutscene_mode == 1 ? "30" : g_settings.cutscene_mode == 2 ? "30fg" : "same");
+    fprintf(f, "gpu_index = %d\ngpu_profile = %s\ngpu_gpl = %s\ngpu_memory_budget = %d\n",
+            g_settings.gpu_index, g_settings.gpu_profile == GPU_PROFILE_COMPATIBILITY ? "compatibility" : "auto",
+            g_settings.gpu_gpl == GPU_GPL_ON ? "on" : g_settings.gpu_gpl == GPU_GPL_OFF ? "off" : "auto",
+            g_settings.gpu_memory_budget);
     fprintf(f, "party_switch = %d\n", g_party_switch);
     fprintf(f, "volume = %d\nmovie_audio = %d\nshow_fps = %d\n", (int)(g_settings.volume * 100 + 0.5f), g_settings.movie_audio,
             g_settings.show_fps);

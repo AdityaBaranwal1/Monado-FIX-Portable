@@ -74,9 +74,16 @@ static void create_instance(void) {
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
     VkResult r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     if (r != VK_SUCCESS && validate) {
-        LOG("[vk] validation layer unavailable (%d); continuing without\n", r);
+        // Retry without validation, but remove debug-utils by name. DLSS may append its
+        // instance extensions after it; decrementing the count drops the last DLSS extension.
+        LOG("[vk] validation instance creation failed (%d); retrying without validation\n", r);
+        const char *retry_ext[16];
+        uint32_t retry_n = 0;
+        for (uint32_t i = 0; i < n_ext; i++)
+            if (strcmp(ext[i], VK_EXT_DEBUG_UTILS_EXTENSION_NAME) != 0) retry_ext[retry_n++] = ext[i];
         ci.enabledLayerCount = 0;
-        ci.enabledExtensionCount--;
+        ci.enabledExtensionCount = retry_n;
+        ci.ppEnabledExtensionNames = retry_ext;
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
@@ -99,41 +106,97 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
-// Discrete GPU first (LARECOMP_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
+// Prefer a discrete GPU, but only among devices that can actually run this renderer and
+// present to the SDL surface. LARECOMP_GPU=<index> is an explicit override.
 static void pick_device(void) {
     uint32_t n = 0;
-    vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
-    if (!n) FATAL("no Vulkan device\n");
+    VkResult vr = vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
+    if (vr != VK_SUCCESS || !n) FATAL("no Vulkan physical devices (%d)\n", vr);
     VkPhysicalDevice *pd = calloc(n, sizeof *pd);
-    vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
-    int want = getenv("LARECOMP_GPU") ? atoi(getenv("LARECOMP_GPU")) : -1, best = -1, best_score = -1;
+    if (!pd) FATAL("out of memory enumerating Vulkan devices\n");
+    vr = vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
+    if (vr != VK_SUCCESS) { free(pd); FATAL("vkEnumeratePhysicalDevices: %d\n", vr); }
+
+    const char *gpu_env = getenv("LARECOMP_GPU");
+    int want = gpu_env && *gpu_env ? atoi(gpu_env) : g_settings.gpu_index;
+    int best = -1, best_score = -1;
+    uint32_t best_qfam = UINT32_MAX;
     for (uint32_t i = 0; i < n; i++) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(pd[i], &p);
-        LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
-            VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
-        if (p.apiVersion < VK_API_VERSION_1_3) continue;
-        int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(pd[i], &props);
+        LOG("[vk] gpu %u: %s (vendor %04x device %04x driver %u, api %u.%u.%u, type %u)\n",
+            i, props.deviceName, props.vendorID, props.deviceID, props.driverVersion,
+            VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
+            VK_API_VERSION_PATCH(props.apiVersion), props.deviceType);
+        if (props.apiVersion < VK_API_VERSION_1_3) {
+            LOG("[vk]   rejected: Vulkan 1.3 is required\n");
+            continue;
+        }
+
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(pd[i], &nq, NULL);
+        VkQueueFamilyProperties *qp = nq ? calloc(nq, sizeof *qp) : NULL;
+        if (nq && !qp) continue;
+        if (nq) vkGetPhysicalDeviceQueueFamilyProperties(pd[i], &nq, qp);
+        uint32_t qfam = UINT32_MAX;
+        for (uint32_t q = 0; q < nq && q < 16; q++) {
+            VkBool32 present = VK_FALSE;
+            if (vkGetPhysicalDeviceSurfaceSupportKHR(pd[i], q, g_vk.surface, &present) != VK_SUCCESS) continue;
+            if (present && (qp[q].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) ==
+                               (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT) && qp[q].queueCount > 0) {
+                qfam = q;
+                break;
+            }
+        }
+        free(qp);
+        if (qfam == UINT32_MAX) {
+            LOG("[vk]   rejected: no graphics+compute+present queue\n");
+            continue;
+        }
+
+        int score = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 :
+                    props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
-        if (score > best_score) { best_score = score; best = (int)i; }
+        if (score > best_score) { best_score = score; best = (int)i; best_qfam = qfam; }
     }
-    if (best < 0) FATAL("no Vulkan 1.3 device\n");
+    if (best < 0) {
+        free(pd);
+        if (want >= 0) FATAL("LARECOMP_GPU=%d is not a usable Vulkan 1.3 device\n", want);
+        FATAL("no Vulkan 1.3 device with a graphics+compute+present queue\n");
+    }
+    if (want >= 0 && best != want)
+        LOG("[vk] requested GPU index %d is unavailable; using automatic selection\n", want);
     g_vk.phys = pd[best];
+    g_vk.phys_index = (uint32_t)best;
+    g_vk.qfam = best_qfam;
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
-    uint32_t nq = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
-    VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
-    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
-    g_vk.qfam = UINT32_MAX;
-    for (uint32_t i = 0; i < nq; i++) {
-        VkBool32 present = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &present);
-        if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && present) { g_vk.qfam = i; break; }
+    g_vk.driver_props = (VkPhysicalDeviceDriverProperties){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 props2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                          .pNext = &g_vk.driver_props};
+    vkGetPhysicalDeviceProperties2(g_vk.phys, &props2);
+
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    VkDeviceSize local_bytes = 0, shared_bytes = 0;
+    for (uint32_t i = 0; i < mp.memoryHeapCount; i++) {
+        bool host_visible = false;
+        for (uint32_t t = 0; t < mp.memoryTypeCount; t++)
+            if (mp.memoryTypes[t].heapIndex == i && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                host_visible = true;
+        VkDeviceSize bytes = mp.memoryHeaps[i].size;
+        // DEVICE_LOCAL alone does not mean dedicated VRAM: integrated GPUs expose system RAM as a local heap.
+        if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && !host_visible) local_bytes += bytes;
+        else shared_bytes += bytes;
     }
-    free(qp);
-    if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
-    LOG("[vk] using %s\n", g_vk.props.deviceName);
+    const char *vendor = g_vk.props.vendorID == 0x1002 ? "AMD" : g_vk.props.vendorID == 0x10de ? "NVIDIA" :
+                         g_vk.props.vendorID == 0x8086 ? "Intel" : "Unknown";
+    LOG("[vk] selected %s; vendor=%s (%04x); driver=%u (%s: %s); dedicated-like heaps %.0f MiB, shared/host-visible heaps %.0f MiB%s\n",
+        g_vk.props.deviceName, vendor, g_vk.props.vendorID, g_vk.props.driverVersion,
+        g_vk.driver_props.driverName, g_vk.driver_props.driverInfo,
+        (double)local_bytes / (1024.0 * 1024.0), (double)shared_bytes / (1024.0 * 1024.0),
+        g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? " (integrated/shared-memory class)" : "");
+    LOG("[vk] using graphics+compute+present queue family %u\n", g_vk.qfam);
 }
 
 static bool g_fault_ext;
@@ -151,7 +214,7 @@ void vk_device_fault_report(void) {
     if (c.vendorInfoCount > 16) c.vendorInfoCount = 16;
     c.vendorBinarySize = 0;
     VkDeviceFaultInfoEXT info = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = addr, .pVendorInfos = vend};
-    if (get(g_vk.dev, &c, &info) != VK_SUCCESS && 0) return;
+    if (get(g_vk.dev, &c, &info) != VK_SUCCESS) { LOG("[vk] device fault: detail query failed\n"); return; }
     LOG("[vk] device fault: %s\n", info.description);
     static const char *const kind[] = {"none", "read invalid", "write invalid", "execute invalid", "ip unknown", "ip invalid", "ip valid"};
     for (uint32_t i = 0; i < c.addressInfoCount; i++)
@@ -182,9 +245,12 @@ static void sc_proxies(void) {
 
 static void create_device(void) {
     uint32_t ne = 0;
-    vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
-    VkExtensionProperties *ep = calloc(ne, sizeof *ep);
-    vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
+    VkResult er = vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
+    if (er != VK_SUCCESS) FATAL("[vk] enumerate device extensions: %d\n", er);
+    VkExtensionProperties *ep = ne ? calloc(ne, sizeof *ep) : NULL;
+    if (ne && !ep) FATAL("[vk] out of memory enumerating device extensions\n");
+    er = vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
+    if (er != VK_SUCCESS) { free(ep); FATAL("[vk] enumerate device extensions: %d\n", er); }
     const char *ext[48];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -192,15 +258,16 @@ static void create_device(void) {
     if (g_vk.custom_border) ext[n_ext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
     g_vk.divisor = has_ext(ep, ne, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
-    g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
+    g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) &&
+                       g_settings.gpu_profile != GPU_PROFILE_COMPATIBILITY;  // optional zero-copy guest heap path
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     // [XCDE] the driver's real per-heap usage and budget for VMA (the [mem] report; a 512 MB iGPU carve-out shows how
     // close it runs) - allocation decisions don't change
-    bool budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) && !(getenv("XCDE_VK_BUDGET") && atoi(getenv("XCDE_VK_BUDGET")) == 0);
+    bool budget = g_settings.gpu_memory_budget && has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    { const char *e = getenv("XCDE_VK_BUDGET"); if (e) budget = atoi(e) != 0 && has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME); }
     if (budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
-    g_fault_ext = fault;
     // [XCDE] T173: vertex fetch past a stream's bound size reads 0 on Maxwell (the game's near-camera fade reads its
     // opacity from a 4-byte stream at stride 4: vertices 1..n must see 0, not the guest memory that follows)
     bool robust2 = has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
@@ -208,13 +275,17 @@ static void create_device(void) {
     // [XCDE] T188: graphics pipeline libraries - a new render-state combination is a fast link of prebuilt pieces
     // instead of a whole pipeline compile. Only where the driver says linking is fast. LARECOMP_VK_GPL=0: off.
     bool gpl = has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
-    { const char *e = getenv("LARECOMP_VK_GPL"); if (e && !atoi(e)) gpl = false; }
+    if (g_settings.gpu_gpl == GPU_GPL_OFF || g_settings.gpu_profile == GPU_PROFILE_COMPATIBILITY) gpl = false;
+    if (g_settings.gpu_gpl == GPU_GPL_ON) gpl = has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+                                                     has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+    { const char *e = getenv("LARECOMP_VK_GPL"); if (e) gpl = atoi(e) != 0 &&
+        has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME); }
     // [VEGA-FIX] AMD integrated GPUs (Vega 7 / Ryzen 5000 mobile, Vega 8...): the Windows driver's graphics pipeline
     // libraries crashed or failed while precompiling shaders (the launcher retried and then the game closed). Whole
     // pipelines are used there instead (slower first draws, but stable). XCDE_VK_GPL=1 forces the libraries back on.
     if (gpl && g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
         const char *e = getenv("XCDE_VK_GPL");
-        if (!(e && atoi(e))) { gpl = false; LOG("[vk] AMD integrated GPU: pipeline libraries off (XCDE_VK_GPL=1 to force them)\n"); }
+        if (g_settings.gpu_gpl != GPU_GPL_ON && !(e && atoi(e))) { gpl = false; LOG("[vk] AMD integrated GPU: pipeline libraries off by conservative default\n"); }
     }
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplhave = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
     if (gpl) {
@@ -233,38 +304,78 @@ static void create_device(void) {
 
     // features the backend relies on (all present on current desktop drivers)
     VkPhysicalDeviceRobustness2FeaturesEXT r2have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    VkPhysicalDeviceFaultFeaturesEXT ffhave = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     // [XCDE] FSR 3 (temporal.c): its shaders use half floats and, on AMD, wave64 compute where the device has them
     VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = robust2 ? &r2have : NULL};
     VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h12};
+    VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    if (fault) {
+        VkPhysicalDeviceFeatures2 fault_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ffhave};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &fault_have);
+        fault = ffhave.deviceFault == VK_TRUE;
+    }
+    g_fault_ext = fault;
+    // Dynamic rendering and synchronization2 are used throughout this backend, not optional
+    // acceleration paths. Fail here with a precise explanation rather than at device creation.
+    if (!h13.dynamicRendering || !h13.synchronization2)
+        FATAL("[vk] %s lacks required Vulkan 1.3 features (dynamicRendering=%u, synchronization2=%u)\n",
+              g_vk.props.deviceName, h13.dynamicRendering, h13.synchronization2);
+    if (!h12.timelineSemaphore)
+        FATAL("[vk] %s lacks required Vulkan 1.2 timelineSemaphore support\n", g_vk.props.deviceName);
     VkPhysicalDeviceRobustness2FeaturesEXT r2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
                                                  .robustBufferAccess2 = r2have.robustBufferAccess2 && have.features.robustBufferAccess};
     g_vk.robust2 = r2.robustBufferAccess2;
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div_have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc_have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT,
+        .pNext = g_vk.divisor ? &div_have : NULL};
+    if (g_vk.custom_border || g_vk.divisor) {
+        VkPhysicalDeviceFeatures2 ext_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                              .pNext = g_vk.custom_border ? (void *)&cbc_have : (void *)&div_have};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &ext_have);
+        g_vk.custom_border = g_vk.custom_border && cbc_have.customBorderColors;
+        g_vk.divisor = g_vk.divisor && div_have.vertexAttributeInstanceRateDivisor;
+    }
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
-        .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
+        .vertexAttributeInstanceRateDivisor = g_vk.divisor ? VK_TRUE : VK_FALSE,
+        .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
     VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, .customBorderColors = VK_TRUE,
-        .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? &div : NULL};
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT,
+        .customBorderColors = g_vk.custom_border ? VK_TRUE : VK_FALSE,
+        .customBorderColorWithoutFormat = g_vk.custom_border && cbc_have.customBorderColorWithoutFormat ? VK_TRUE : VK_FALSE,
+        .pNext = g_vk.divisor ? &div : NULL};
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-                                            .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE,
-                                            .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
-                                            .maintenance4 = VK_TRUE, .pipelineCreationCacheControl = VK_TRUE,  // [XCDE] T188
+                                            .dynamicRendering = h13.dynamicRendering, .synchronization2 = h13.synchronization2,
+                                            .shaderDemoteToHelperInvocation = h13.shaderDemoteToHelperInvocation,
+                                            .shaderTerminateInvocation = h13.shaderTerminateInvocation,
+                                            .maintenance4 = h13.maintenance4,
+                                            .pipelineCreationCacheControl = h13.pipelineCreationCacheControl,  // [XCDE] T188
                                             .subgroupSizeControl = h13.subgroupSizeControl, .computeFullSubgroups = h13.computeFullSubgroups,
                                             .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                                            .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
-                                            .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE, .shaderFloat16 = h12.shaderFloat16, .pNext = &f13,
+                                            .timelineSemaphore = h12.timelineSemaphore, .shaderInt8 = h12.shaderInt8,
+                                            .samplerMirrorClampToEdge = h12.samplerMirrorClampToEdge,
+                                            .uniformAndStorageBuffer8BitAccess = h12.uniformAndStorageBuffer8BitAccess,
+                                            .storageBuffer8BitAccess = h12.storageBuffer8BitAccess,
+                                            .scalarBlockLayout = h12.scalarBlockLayout, .shaderFloat16 = h12.shaderFloat16, .pNext = &f13,
                                             .samplerFilterMinmax = h12.samplerFilterMinmax};  // [XCDE] NVN reduction filters
     g_vk.minmax = h12.samplerFilterMinmax;
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
                                                                .graphicsPipelineLibrary = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = gpl ? (void *)&gplf : (void *)&f12};
-    VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
-                                           .pNext = &f11};
+                                            .storageBuffer16BitAccess = h11.storageBuffer16BitAccess,
+                                            .pNext = gpl ? (void *)&gplf : (void *)&f12};
+    VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT,
+                                           .deviceFault = fault ? VK_TRUE : VK_FALSE, .pNext = &f11};
+    LOG("[vk] optional features: int8=%u 8bit-buffer=%u scalar-layout=%u float16=%u storage16=%u "
+        "demote=%u terminate=%u maintenance4=%u pipeline-cache-control=%u minmax=%u\n",
+        f12.shaderInt8, f12.storageBuffer8BitAccess, f12.scalarBlockLayout, f12.shaderFloat16,
+        f11.storageBuffer16BitAccess, f13.shaderDemoteToHelperInvocation, f13.shaderTerminateInvocation,
+        f13.maintenance4, f13.pipelineCreationCacheControl, f12.samplerFilterMinmax);
     if (g_vk.robust2) { r2.pNext = fault ? (void *)&ff : (void *)&f11; }
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
                                    .pNext = g_vk.robust2 ? (void *)&r2 : fault ? (void *)&ff : (void *)&f11};
@@ -310,8 +421,10 @@ static void create_device(void) {
     if (nf > 16) nf = 16;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nf, qp);
     uint32_t used[16] = {0};
+    if (g_vk.qfam >= nf) FATAL("[vk] selected queue family %u is outside the enumerated range %u\n", g_vk.qfam, nf);
     used[g_vk.qfam] = 1 + extra_g + extra_c;
     if (used[g_vk.qfam] > qp[g_vk.qfam].queueCount) used[g_vk.qfam] = qp[g_vk.qfam].queueCount;
+    if (used[g_vk.qfam] > 16) used[g_vk.qfam] = 16;  // prio[] has 16 entries; never pass a larger queueCount.
     {
         extern bool tmp_frame_gen_wanted(void);
         uint32_t fam[3] = {UINT32_MAX, UINT32_MAX, UINT32_MAX}, idx[3] = {0};  // present, acquire, compute
@@ -380,11 +493,25 @@ static void create_device(void) {
     void *data = NULL;
     FILE *fp = fopen("cache/vk_pipelines.bin", "rb");
     if (fp) {
-        fseek(fp, 0, SEEK_END);
-        sz = (size_t)ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-        data = malloc(sz);
-        if (fread(data, 1, sz, fp) != sz) sz = 0;
+        // Treat the cache as untrusted input: a truncated, stale or unexpectedly huge file
+        // must never turn into an allocation failure or a NULL fread destination.
+        if (fseek(fp, 0, SEEK_END) == 0) {
+            long end = ftell(fp);
+            if (end > 0 && end <= 128L * 1024L * 1024L && fseek(fp, 0, SEEK_SET) == 0) {
+                sz = (size_t)end;
+                data = malloc(sz);
+                if (!data || fread(data, 1, sz, fp) != sz) {
+                    free(data);
+                    data = NULL;
+                    sz = 0;
+                    LOG("[vk] pipeline cache ignored: allocation/read failed\\n");
+                }
+            } else {
+                LOG("[vk] pipeline cache ignored: invalid size (%ld bytes)\\n", end);
+            }
+        } else {
+            LOG("[vk] pipeline cache ignored: cannot seek\\n");
+        }
         fclose(fp);
     }
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
@@ -419,7 +546,15 @@ void vk_pipeline_cache_save(void) {
     if (getenv("LARECOMP_HIDDEN") && !getenv("XCDE_SAVE_CACHE")) return;
     size_t sz = 0;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+    if (sz > 128u * 1024u * 1024u) {
+        LOG("[vk] pipeline cache not saved: %zu bytes exceeds 128 MiB safety limit\\n", sz);
+        return;
+    }
     void *data = malloc(sz);
+    if (!data) {
+        LOG("[vk] pipeline cache not saved: out of memory for %zu bytes\\n", sz);
+        return;
+    }
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
         char tmp[64];  // (per process: test runs and the user's game save the same cache)
