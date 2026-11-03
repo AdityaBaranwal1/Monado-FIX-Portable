@@ -33,6 +33,7 @@ Si descargas la versión portable pon tu Exefs y Romfs en la carpeta /targets re
 GIT: https://git-scm.com/install/windows
 
 Pasos:
+
 1.- Tienen que iniciar el Build Monado.bat lo que hará será instalar todas las dependencias necesarias 5Gb aproximadamente.
 
 2.- Dentro del .bat les dirán que seleccionen el juego ya extraído su Romfs y su Exefs.
@@ -51,6 +52,7 @@ Esta versión ya esta COMPILADA desde mi pc y hecha para poner en hasta una USB 
 NOTA: NECESITAS IGUALMENTE TUS EXEFS Y ROMFS.
 
 Pasos:
+
 1.- Copiar tus Exefs y Romfs extraídos en la carpeta /targets/Romfs y /targets/Exefs dentro del port.
 
 2.- Inicia el juego y espera a que compilen los shaders y listo xd.
