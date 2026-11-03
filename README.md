@@ -34,9 +34,13 @@ GIT: https://git-scm.com/install/windows
 
 Pasos:
 1.- Tienen que iniciar el Build Monado.bat lo que hará será instalar todas las dependencias necesarias 5Gb aproximadamente.
+
 2.- Dentro del .bat les dirán que seleccionen el juego ya extraído su Romfs y su Exefs.
+
 3.- Una ves terminado el progreso y ya compilado lo pueden iniciar.
+
 4.- Iniciar Play Monado
+
 5.- Esperan a que inicie y compile los shaders para que no haya lag.
 
 -----------------------------------------------------------------------------------------------------
