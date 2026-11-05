@@ -1,5 +1,5 @@
 #ESPAÑOL
-
+-----------------------------------------------------------------------------------------------------
 # Rendimiento e interfaz V6
 
 Se añadieron perfiles Equilibrado/Rendimiento/Patata, objetivos FPS independientes, optimizaciones internas y una interfaz grafito/verde. Los recortes decorativos nuevos son opcionales y experimentales. Uso, configuración, compilación y límites en [Rendimiento e interfaz](docs/PERFORMANCE_UI.md); resultados y pruebas pendientes en [evidencia local](docs/evidence/performance_ui_2026-11-04.md). No se promete una ganancia de FPS sin medición por escena/equipo.
@@ -78,7 +78,7 @@ Este fork lo hice yo Ivan Prestef2 estuve testeando y probándolo espero que lo 
 
 ------------------------------------------------------------------------------------------------------
 #INGLES
-
+-----------------------------------------------------------------------------------------------------
 # V6 Performance and Interface
 
 Balanced/Performance/Potato profiles, independent target FPS, internal optimizations, and a graphite/green interface were added. The new decorative cutouts are optional and experimental. Usage, configuration, compilation, and limits are in [Performance and UI](https://www.google.com/search?q=docs/PERFORMANCE_UI.md); results and pending tests are in [local evidence](https://www.google.com/search?q=docs/evidence/performance_ui_2026-11-04.md). No FPS gain is promised without per-scene/per-rig measurement.
