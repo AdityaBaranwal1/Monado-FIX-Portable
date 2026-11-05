@@ -1,3 +1,5 @@
+#ESPAÑOL
+
 # Rendimiento e interfaz V6
 
 Se añadieron perfiles Equilibrado/Rendimiento/Patata, objetivos FPS independientes, optimizaciones internas y una interfaz grafito/verde. Los recortes decorativos nuevos son opcionales y experimentales. Uso, configuración, compilación y límites en [Rendimiento e interfaz](docs/PERFORMANCE_UI.md); resultados y pruebas pendientes en [evidencia local](docs/evidence/performance_ui_2026-11-04.md). No se promete una ganancia de FPS sin medición por escena/equipo.
@@ -73,6 +75,89 @@ Pasos:
 
 Gracias por leerlo se que da hueva pero que se le hará xd.
 Este fork lo hice yo Ivan Prestef2 estuve testeando y probándolo espero que lo disfrutes también visita mi canal de YouTube para ver mis videos xd.
+
+------------------------------------------------------------------------------------------------------
+#INGLES
+
+# V6 Performance and Interface
+
+Balanced/Performance/Potato profiles, independent target FPS, internal optimizations, and a graphite/green interface were added. The new decorative cutouts are optional and experimental. Usage, configuration, compilation, and limits are in [Performance and UI](https://www.google.com/search?q=docs/PERFORMANCE_UI.md); results and pending tests are in [local evidence](https://www.google.com/search?q=docs/evidence/performance_ui_2026-11-04.md). No FPS gain is promised without per-scene/per-rig measurement.
+
+# Local Technical Continuation — 2026-11-04
+
+GPU selection by name, Vulkan 1.2/1.3 negotiation, image reuse and non-coherent memory fixes, fractional timing, and tests without game data were added. Verified status and remaining open issues are in [port validation](https://www.google.com/search?q=docs/PORT_VALIDATION.md). This is neither a new release nor a playable compatibility certification.
+
+Expansion: [Vulkan 1.2/1.3/1.4 path selector, automatic DLSS with official runtime, and on-screen FPS counter](https://www.google.com/search?q=docs/VULKAN_DLSS_FPS.md).
+
+# ATTENTION
+
+A solution for the AMD crash and FPS drops is being found (it turns out certain heavy shaders are causing it to fail). The original project already offered an option to skip those shaders, though it takes time and testing to try all the problematic shaders and skip them (the main lag is resolved).
+The v5 update will be published with these improvements and I'll be happy lol.
+
+# If you encounter any error, please post it in the ISSUES tab to see if it can be fixed.
+
+# Start
+
+Hello, this version was modified thanks to Claudio (the original work is almost entirely done by an AI, but I've added improvements and fixed bugs).
+
+It is based on the fork: [https://github.com/vinitaison/Monado](https://github.com/vinitaison/Monado)
+Which in turn is based on the original by TheMonadoGuy/Monado (It's already down, but we will remember your sacrifice)
+
+------------------------------------------------------------------------------------------------------
+
+# NOTICE:
+
+To use it, you need to install GIT (supposedly if you want to build it yourself, otherwise you can download the PORTABLE one and I think it doesn't depend on GIT, I haven't tested it).
+
+Have 7zip installed (To unzip): [https://www.7-zip.org/](https://www.7-zip.org/)
+
+GIT: [https://git-scm.com/install/windows](https://git-scm.com/install/windows)
+
+Select and install:
+Standalone Installer
+Git for Windows/x64 Setup.
+
+NSP FILES OR ANYTHING LIKE THAT ARE NOT USED; INSTEAD, YOUR EXTRACTED GAME DATA IS USED (either from an original Switch with your legal copy of the game with update 2.0.0 applied). THIS CAN BE DONE WITH RYUJINX AS IT ALLOWS YOU TO EXTRACT YOUR COPY LEGALLY.
+
+------------------------------------------------------------------------------------------------------
+
+# NOTE:
+
+## If you download the portable version, put your Exefs and Romfs in the /targets folder; remember it must be version 2.0.0.
+
+1.- The COMPILAR.zip version (needs COMPILING) comes completely empty, so in this one you will have to download the libraries (they download automatically) and install GIT. It is very important, otherwise it won't start.
+GIT: [https://git-scm.com/install/windows](https://git-scm.com/install/windows)
+
+Steps:
+
+1.- You have to run Build Monado.bat, which will install all necessary dependencies—approximately 5GB.
+
+2.- Inside the .bat it will tell you to select your already extracted game Romfs and Exefs.
+
+3.- Once the progress is finished and it's compiled, you can start it.
+
+4.- Start Play Monado
+
+5.- Wait for it to start and compile the shaders so there is no lag.
+
+------------------------------------------------------------------------------------------------------
+
+2.- THE BEST VERSION LET'S GOOO!!! is Xde-Portable.zip (NO COMPILING NEEDED, IT'S DIRECT)
+This version is already COMPILED from my PC and made to fit even on a USB stick; you don't need anything installed.
+
+NOTE: YOU STILL NEED YOUR EXEFS AND ROMFS.
+
+Steps:
+
+1.- Copy your extracted Exefs and Romfs into the /targets/Romfs and /targets/Exefs folders inside the port.
+
+2.- Start the game, wait for the shaders to compile, and that's it lol.
+
+------------------------------------------------------------------------------------------------------
+
+Thanks for reading, I know it's a pain, but what can you do lol.
+I made this fork, I'm Ivan Prestef2, I was testing and trying it out. I hope you enjoy it as well; also visit my YouTube channel to watch my videos lol.
+
 
 ------------------------------------------------------------------------------------------------------
 
