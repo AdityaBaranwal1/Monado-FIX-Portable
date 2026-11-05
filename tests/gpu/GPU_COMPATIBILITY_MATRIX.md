@@ -2,6 +2,8 @@
 
 This matrix is a test plan, not a compatibility claim. A row becomes **verified** only after the executable has launched, rendered gameplay and cinematics, completed save/load, and passed the soak test on the named GPU + driver.
 
+2026-11-04: an AMD integrated adapter passed procedural core-1.3/KHR-1.2 clear/readback smoke tests. No row below is promoted to gameplay-verified. See `docs/evidence/port_2026-11-04.md` and `docs/PORT_VALIDATION.md` for results, execution restrictions, the named GPU selector and open heap-windowing work.
+
 ## Required matrix
 
 | Vendor / family | Representative target | Required checks | Status before hardware run |

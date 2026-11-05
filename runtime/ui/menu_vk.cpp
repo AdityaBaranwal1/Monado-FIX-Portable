@@ -1,3 +1,5 @@
+#include "../fps_meter.h"
+#include "gpu_picker.h"
 // [XCDE] In-game settings overlay (runtime/ui/menu.h; Windows / Vulkan): F1 opens and closes it (Esc closes), the
 // launcher's options over the running game. Dear ImGui drawn by its Vulkan backend into the window image after the
 // game image (device.c calls menu_render inside that rendering). Events arrive on the main thread and are queued for
@@ -11,6 +13,8 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "theme.h"
+#include "quality_controls.h"
 #include "imgui_impl_vulkan.h"
 
 extern "C" {
@@ -21,8 +25,12 @@ bool vk_imgui_backend_init(void);
 void input_reset(void);
 void vk_request_swapchain_recreate(void);
 bool dlss_available(void);
+const char *dlss_status(void);
+bool diag_deterministic(void);
 }
 
+static XcdeFpsMeter fps_meter;
+extern "C" void menu_fps_tick(uint64_t now_ns) { xcde_fps_tick(&fps_meter, now_ns); }
 static std::mutex q_lock;
 static SDL_Event q[256];
 static int q_n;
@@ -152,7 +160,7 @@ static void feed(ImGuiIO &io, uint32_t w, uint32_t h) {
 static const char *const k_en[][2] = {
     {"Igual que la ventana (recomendado)", "Match the window (recommended)"}, {"1x - 720p (como Switch)", "1x - 720p (like Switch)"},
     {"75 % de la ventana", "75 % of the window"}, {"50 % de la ventana", "50 % of the window"},
-    {"Dinámica (mantiene 60 FPS)", "Dynamic (holds 60 FPS)"}, {"Opciones  (F1 / Esc para volver al juego)", "Options  (F1 / Esc to go back to the game)"},
+    {"Dinámica (según objetivo FPS)", "Dynamic (follows FPS target)"}, {"Opciones  (F1 / Esc para volver al juego)", "Options  (F1 / Esc to go back to the game)"},
     {"Gráficos", "Graphics"}, {"Pantalla", "Display"}, {"Pantalla completa", "Fullscreen"},
     {"Resolución y escalado", "Resolution and scaling"}, {"Resolución interna", "Internal resolution"},
     {"Bilineal (suave)", "Bilinear (soft)"}, {"AMD FSR 1.0 (nítido)", "AMD FSR 1.0 (sharp)"}, {"Escalado / antialiasing", "Upscaling / anti-aliasing"},
@@ -164,7 +172,7 @@ static const char *const k_en[][2] = {
     {"Profundidad de campo", "Depth of field"},
     {"Antialiasing y desenfoque de movimiento del juego (al reiniciar)", "The game's anti-aliasing and motion blur (after a restart)"},
     {"Mostrar FPS en la barra de título", "Show FPS in the title bar"}, {"Velocidad", "Speed"}, {"30 (como en Switch)", "30 (like Switch)"},
-    {"Sin límite", "Unlimited"}, {"FPS (al reiniciar)", "FPS (after a restart)"}, {"V-Sync (con 30 / 60 FPS)", "V-Sync (at 30 / 60 FPS)"},
+    {"Sin límite", "Unlímited"}, {"FPS (al reiniciar)", "FPS (after a restart)"}, {"V-Sync (con 30 / 60 FPS)", "V-Sync (at 30 / 60 FPS)"},
     {"Volumen", "Volume"}, {"Audio de los vídeos (al reiniciar)", "Video sound (after a restart)"}, {"Controles", "Controls"},
     {"La asignación de teclas y botones se cambia en el launcher (Play Monado.bat), pestaña Controles.",
      "Keys and buttons are remapped in the launcher, Controls tab."},
@@ -188,36 +196,49 @@ struct TList { const char *p[8]; };
 static TList TL(const char *const *a, int n) { TList t{}; for (int i = 0; i < n && i < 8; i++) t.p[i] = T(a[i]); return t; }
 
 static const char *const k_res_ui[] = {"Igual que la ventana (recomendado)", "1x - 720p (como Switch)", "2x - 1440p", "3x - 2160p",
-                                       "75 % de la ventana", "50 % de la ventana", "Dinámica (mantiene 60 FPS)"};
+                                       "75 % de la ventana", "50 % de la ventana", "Dinámica (según objetivo FPS)"};
 static const int k_res_mode[] = {RES_MATCH, 1, 2, 3, RES_Q75, RES_Q50, RES_DYNAMIC};
 
 static void ui(void) {
     static bool saved_note;
+    Settings opening=g_settings, quality_before=g_settings;
     ImGuiViewport *vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->Size.x * 0.5f, vp->Size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(vp->Size.y * 0.95f, vp->Size.y * 0.8f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(fminf(vp->Size.x-24,940),fminf(vp->Size.y-24,720)), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.92f);
     ImGui::Begin(T("Opciones  (F1 / Esc para volver al juego)"), nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::BeginChild("options_body",ImVec2(0,-ImGui::GetFrameHeightWithSpacing()*2),ImGuiChildFlags_Borders);
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem(T("Gráficos"))) {
+            monado_quality_controls(&g_settings,g_settings.ui_lang!=0);
+            quality_before=g_settings;
             ImGui::SeparatorText(T("Pantalla"));
             if (ImGui::Checkbox(T("Pantalla completa"), &g_settings.fullscreen)) want_window = true;
             ImGui::SeparatorText(T("Resolución y escalado"));
             int ri = 0;
             for (int i = 0; i < 7; i++) if (k_res_mode[i] == g_settings.res_mode) ri = i;
-            if (ImGui::Combo(T("Resolución interna"), &ri, TL(k_res_ui, 7).p, 7)) g_settings.res_mode = k_res_mode[ri];
+            if (monado_combo(T("Resolución interna"), &ri, TL(k_res_ui, 7).p, 7)) g_settings.res_mode = k_res_mode[ri];
             static const char *ups[] = {"Bilineal (suave)", "AMD FSR 1.0 (nítido)", "AMD FSR 3.1 (temporal)", "NVIDIA DLSS (temporal, RTX)"};
             static const int upv[] = {UPSCALE_BILINEAR, UPSCALE_FSR1, UPSCALE_FSR3, UPSCALE_DLSS};
             int ui_ = 0;
             for (int i = 0; i < 4; i++) if (upv[i] == g_settings.upscaler) ui_ = i;
-            if (ImGui::Combo(T("Escalado / antialiasing"), &ui_, TL(ups, 4).p, 4)) g_settings.upscaler = upv[ui_];
-            if (g_settings.upscaler == UPSCALE_DLSS && !dlss_available())
-                ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), T("DLSS se carga al iniciar el juego: hasta reiniciar se usa FSR 3.1."));
+            const char *preview = g_settings.upscaler_auto ? (g_settings.ui_lang ? "Automatic (DLSS on supported RTX)" : "Automático (DLSS en RTX compatible)") : T(ups[ui_]);
+            if (monado_begin_combo(T("Escalado / antialiasing"), preview)) {
+                if (ImGui::Selectable(g_settings.ui_lang ? "Automatic (restart)" : "Automático (reiniciar)", g_settings.upscaler_auto)) g_settings.upscaler_auto = true;
+                for (int i = 0; i < 4; ++i) {
+                    bool unavailable = i == 3 && !dlss_available();
+                    ImGui::BeginDisabled(unavailable);
+                    if (ImGui::Selectable(T(ups[i]), !g_settings.upscaler_auto && ui_ == i)) { g_settings.upscaler_auto = false; g_settings.upscaler = upv[i]; }
+                    ImGui::EndDisabled();
+                    if (unavailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", dlss_status());
+                }
+                ImGui::EndCombo();
+            }
             if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DLSS) {
                 static const char *uq[] = {"Nativo (solo antialiasing)", "Calidad (67 %)", "Equilibrado (59 %)", "Rendimiento (50 %)",
                                            "Ultra rendimiento (33 %)"};
-                ImGui::Combo(T("Calidad del escalado"), &g_settings.upscale_quality, TL(uq, 5).p, 5);
+                monado_combo(T("Calidad del escalado"), &g_settings.upscale_quality, TL(uq, 5).p, 5);
                 ImGui::BeginDisabled(g_settings.upscaler != UPSCALE_FSR3);
                 ImGui::Checkbox(T("Generación de frames (FSR 3; activarla por primera vez: al reiniciar)"), &g_settings.frame_gen);
                 ImGui::EndDisabled();
@@ -229,14 +250,12 @@ static void ui(void) {
             bool dof = !g_settings.dof_off;
             if (ImGui::Checkbox(T("Profundidad de campo"), &dof)) g_settings.dof_off = !dof;
             ImGui::Checkbox(T("Antialiasing y desenfoque de movimiento del juego (al reiniciar)"), &g_settings.game_blur);
+            ImGui::Checkbox(g_settings.ui_lang ? "On-screen FPS counter" : "Contador FPS en pantalla", &g_settings.fps_overlay);
             ImGui::Checkbox(T("Mostrar FPS en la barra de título"), &g_settings.show_fps);
             ImGui::SeparatorText(T("Velocidad"));
-            static const int fpsv[] = {30, 60, 120, 144, 165, 0};
-            static const char *fpsu[] = {"30 (como en Switch)", "60", "120", "144", "165", "Sin límite"};
-            int fi = 0;
-            for (int i = 0; i < 6; i++) if (fpsv[i] == g_settings.fps) fi = i;
-            if (ImGui::Combo(T("FPS (al reiniciar)"), &fi, TL(fpsu, 6).p, 6)) g_settings.fps = fpsv[fi];
             if (ImGui::Checkbox(T("V-Sync (con 30 / 60 FPS)"), &g_settings.vsync)) vk_request_swapchain_recreate();
+            monado_effect_controls(&g_settings,g_settings.ui_lang!=0);
+            if (ImGui::Button(g_settings.ui_lang ? "Restore graphics" : "Restaurar gráficos")) { xcde_quality_apply(&g_settings,QUALITY_BALANCED); quality_before=g_settings; }
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(T("GPU / Vulkan"))) {
@@ -249,8 +268,7 @@ static void ui(void) {
                                g_vk.driver_props.driverName, g_vk.driver_props.driverInfo);
             ImGui::Text("Vulkan %u.%u.%u | adapter index %u", VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
                         VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion), g_vk.phys_index);
-            VkPhysicalDeviceMemoryProperties mp{};
-            vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+            VkPhysicalDeviceMemoryProperties mp=g_vk.memory_props;
             VkDeviceSize local = 0, shared = 0;
             for (uint32_t i = 0; i < mp.memoryHeapCount; ++i) {
                 bool host_visible = false;
@@ -263,8 +281,9 @@ static void ui(void) {
             ImGui::Text("%s: %.0f MiB", T("Memoria local reportada"), (double)local / (1024.0 * 1024.0));
             ImGui::Text("%s: %.0f MiB", T("Memoria compartida / no local"), (double)shared / (1024.0 * 1024.0));
             if (g_vk.vma) {
-                VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
-                vmaGetHeapBudgets(g_vk.vma, budgets);
+                static VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+                static uint64_t budget_at; uint64_t now=SDL_GetTicksNS();
+                if (!budget_at || now-budget_at>=500000000ull) { vmaGetHeapBudgets(g_vk.vma, budgets); budget_at=now; }
                 ImGui::SeparatorText(T("Presupuesto de memoria (VMA / controlador)"));
                 for (uint32_t i = 0; i < mp.memoryHeapCount; ++i) {
                     const double used_mb = (double)budgets[i].usage / (1024.0 * 1024.0);
@@ -285,17 +304,24 @@ static void ui(void) {
             if (g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
                 ImGui::TextWrapped(T("GPU integrada: la memoria del sistema es compartida; el tamaño del heap Vulkan no equivale a VRAM dedicada."));
             ImGui::SeparatorText(T("Selección y compatibilidad (al reiniciar)"));
-            ImGui::SetNextItemWidth(180.0f);
-            ImGui::InputInt(T("Índice de GPU (-1 = automático)"), &g_settings.gpu_index);
-            if (g_settings.gpu_index < -1) g_settings.gpu_index = -1;
-            if (g_settings.gpu_index > 255) g_settings.gpu_index = 255;
+            xcde_gpu_picker(g_settings.ui_lang ? "Graphics adapter" : "Adaptador gráfico", g_settings.gpu_uuid,
+                            sizeof g_settings.gpu_uuid, &g_settings.gpu_index, g_vk_adapters, g_vk_adapter_count, g_settings.ui_lang != 0);
+            const XcdeGpuInfo *selected_gpu = xcde_gpu_preference(g_vk_adapters, g_vk_adapter_count, g_settings.gpu_uuid, g_settings.gpu_index);
+            xcde_vulkan_picker(selected_gpu, g_vk.loader_api_version, &g_settings.vulkan_api, g_settings.ui_lang != 0);
+            ImGui::Text(g_settings.ui_lang ? "Active route: Vulkan %u.%u" : "Ruta activa: Vulkan %u.%u",
+                        VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
+            ImGui::TextWrapped("DLSS: %s", dlss_status());
+            ImGui::Checkbox(g_settings.ui_lang ? "Restore heavy AMD volume effects (restart)" : "Restaurar efectos volumétricos AMD (reiniciar)", &g_settings.gpu_keep_heavy);
+            if (g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+                ImGui::TextWrapped(g_settings.ui_lang ? "Three expensive volume effects are disabled by default on AMD integrated GPUs." :
+                    "Tres efectos volumétricos costosos se desactivan por defecto en las GPU integradas AMD.");
             static const char *profiles[] = {"Automático (recomendado)", "Compatibilidad (desactiva rutas opcionales rápidas)"};
             int profile = g_settings.gpu_profile == GPU_PROFILE_COMPATIBILITY ? 1 : 0;
-            if (ImGui::Combo(T("Perfil gráfico"), &profile, TL(profiles, 2).p, 2))
+            if (monado_combo(T("Perfil gráfico"), &profile, TL(profiles, 2).p, 2))
                 g_settings.gpu_profile = profile ? GPU_PROFILE_COMPATIBILITY : GPU_PROFILE_AUTO;
             static const char *gpl_modes[] = {"Según el controlador", "Desactivadas", "Activadas si son compatibles"};
             int gpl = g_settings.gpu_gpl == GPU_GPL_OFF ? 1 : g_settings.gpu_gpl == GPU_GPL_ON ? 2 : 0;
-            if (ImGui::Combo(T("Bibliotecas de pipelines"), &gpl, TL(gpl_modes, 3).p, 3))
+            if (monado_combo(T("Bibliotecas de pipelines"), &gpl, TL(gpl_modes, 3).p, 3))
                 g_settings.gpu_gpl = gpl == 1 ? GPU_GPL_OFF : gpl == 2 ? GPU_GPL_ON : GPU_GPL_AUTO;
             ImGui::Checkbox(T("Presupuesto de memoria Vulkan"), &g_settings.gpu_memory_budget);
             ImGui::TextDisabled(T("Estos cambios requieren reiniciar el juego."));
@@ -313,8 +339,11 @@ static void ui(void) {
         }
         ImGui::EndTabBar();
     }
+    ImGui::EndChild();
+    if (g_settings.quality_preset==quality_before.quality_preset && !xcde_quality_equal(xcde_quality_current(&quality_before),xcde_quality_current(&g_settings))) { g_settings.quality_preset=QUALITY_CUSTOM; saved_note=false; }
+    if (memcmp(&opening,&g_settings,sizeof g_settings)!=0) saved_note=false;
     ImGui::Separator();
-    if (ImGui::Button(T("Guardar"))) { settings_save(); saved_note = true; }
+    if (ImGui::Button(g_settings.ui_lang ? "Apply" : "Aplicar")) { settings_save(); saved_note = true; }
     ImGui::SameLine();
     if (ImGui::Button(T("Volver al juego"))) { open_ = false; input_reset(); }
     if (saved_note) { ImGui::SameLine(); ImGui::TextDisabled(T("Guardado en xcde.ini")); }
@@ -325,7 +354,8 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
     static ImGuiContext *ctx;
     static float font_h;
     static uint64_t t_last;
-    if (!open_) return;
+    bool show_counter = g_settings.fps_overlay && !diag_deterministic();
+    if (!open_ && !show_counter) return;
     if (!ctx) {
         ctx = ImGui::CreateContext();
         ImGui::SetCurrentContext(ctx);
@@ -336,8 +366,7 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
         font_h = fmaxf(16.0f, h / 1080.0f * 22.0f);
         if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", font_h, nullptr, io.Fonts->GetGlyphRangesDefault()))
             io.Fonts->AddFontDefault();
-        ImGui::StyleColorsDark();
-        ImGui::GetStyle().ScaleAllSizes(font_h / 16.0f);
+        monado_theme(font_h / 16.0f);
         if (!vk_imgui_backend_init()) { ImGui::DestroyContext(ctx); ctx = nullptr; open_ = false; return; }
         ImGui_ImplVulkan_CreateFontsTexture();
     }
@@ -348,10 +377,19 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
     io.DeltaTime = t_last ? (float)((now - t_last) / 1e9) : 1.0f / 60;
     if (io.DeltaTime <= 0) io.DeltaTime = 1.0f / 60;
     t_last = now;
-    feed(io, w, h);
+    if (open_) feed(io, w, h);
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-    ui();
+    if (open_) ui();
+    if (show_counter) {
+        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.65f);
+        ImGui::Begin("##native-fps", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+        if (fps_meter.fps > 0) ImGui::Text("FPS: %.1f  |  %.2f ms", fps_meter.fps, fps_meter.ms);
+        else ImGui::TextUnformatted("FPS: --");
+        ImGui::End();
+    }
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
 }

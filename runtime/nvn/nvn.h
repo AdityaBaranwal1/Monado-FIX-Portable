@@ -1,3 +1,4 @@
+#include "../window_reuse.h"
 // NVN implemented on the host. Guest NVN objects hold a pointer to a host object at offset 0;
 // builders and small state objects store their fields directly in guest memory.
 #pragma once
@@ -86,6 +87,7 @@ typedef struct NvnWindow {
     uint64_t textures[8];  // guest NVNtexture*
     int num, active, interval, next;
     int crop[4];
+    XcdeWindowSlot reuse[8]; // [XCDE] T255: host-only present completion per guest image
 } NvnWindow;
 
 typedef struct NvnSync {

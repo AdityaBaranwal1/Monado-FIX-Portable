@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "vk.h"
+#include "texture_index.h"
 #include "shaders.h"
 void vk_watch(VkImage dst, const char *site);  // [XCDE] debugging: log writes to a watched image
 #include "../astc.h"
@@ -348,7 +349,7 @@ void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags as
 }
 
 // Images destroyed by the guest are kept until the submissions that may use them have completed.
-typedef struct { VkImage img; VmaAllocation mem; VkImageView view; uint64_t seq; } Dead;
+typedef struct { VkImage img; VmaAllocation mem; VkImageView view; uint64_t seq; VkBuffer buf; VkDeviceMemory raw_mem; } Dead;
 static Dead *dead;
 static int ndead, cap_dead;
 static void views_forget(TexBackend *b);
@@ -359,6 +360,10 @@ void vk_collect_dead(void) {
     for (int i = 0; i < ndead; i++) {
         if (dead[i].seq > done) { dead[k++] = dead[i]; continue; }
         if (dead[i].view) vkDestroyImageView(g_vk.dev, dead[i].view, NULL);
+        else if (dead[i].buf) {
+            if (dead[i].raw_mem) { vkDestroyBuffer(g_vk.dev, dead[i].buf, NULL); vkFreeMemory(g_vk.dev, dead[i].raw_mem, NULL); }
+            else vmaDestroyBuffer(g_vk.vma, dead[i].buf, dead[i].mem);
+        }
         else vmaDestroyImage(g_vk.vma, dead[i].img, dead[i].mem);
     }
     ndead = k;
@@ -506,6 +511,8 @@ static void defer(Dead d) {
 }
 
 void vk_defer_image(VkImage img, VmaAllocation mem) { defer((Dead){.img = img, .mem = mem}); }
+void vk_defer_buffer(VkBuffer buf, VmaAllocation mem) { defer((Dead){.buf = buf, .mem = mem}); }
+void vk_defer_import(VkBuffer buf, VkDeviceMemory mem) { defer((Dead){.buf = buf, .raw_mem = mem}); }
 void vk_defer_view(VkImageView v) { defer((Dead){.view = v}); }
 
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv);  // (exec.c: LARECOMP_VK_DEVLOST_TRACE)
@@ -532,19 +539,23 @@ static void destroy_image(TexBackend *b) {
 // Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
 static NvnTexture **g_live;
 static int g_nlive, g_cap_live;
+static XcdeTextureIndex address_index;
 static void live_add(NvnTexture *t, TexBackend *b) {
     if (g_nlive == g_cap_live) { g_cap_live = g_cap_live ? g_cap_live * 2 : 1024; g_live = realloc(g_live, g_cap_live * sizeof *g_live); }
     g_live[g_nlive++] = t;
     b->reg = g_nlive;
+    xcde_texture_index_add(&address_index,t,b);
 }
 static void live_remove(TexBackend *b) {
     if (!b->reg) return;
+    xcde_texture_index_remove(&address_index,b);
     NvnTexture *last = g_live[--g_nlive];
     g_live[b->reg - 1] = last;
     if (last->backend) ((TexBackend *)last->backend)->reg = b->reg;
     b->reg = 0;
 }
 
+static TexBackend *shared_backend(NvnTexture *t) { return xcde_texture_index_find(&address_index,g_live,t); }
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
@@ -560,14 +571,9 @@ static TexBackend *tex_backend(NvnTexture *t) {
     // render target, a format view): they must see one image. Same address, size, levels and samples, and the same
     // format or both depth / stencil formats.
     if (t->addr && !getenv("XCDE_NO_TEX_SHARE")) {
-        for (int i = 0; i < g_nlive; i++) {
-            NvnTexture *o = g_live[i];
-            TexBackend *ob = o->backend;
-            if (!ob || o == t || o->addr != t->addr || o->width != t->width || o->height != t->height || o->depth != t->depth ||
-                o->levels != t->levels || o->samples != t->samples || o->target != t->target)
-                continue;
-            bool fmt_ok = o->format == t->format || (renderer_format_is_depth(o->format) && renderer_format_is_depth(t->format));
-            if (!fmt_ok || ob->nshare >= (int)(sizeof ob->share / sizeof ob->share[0])) continue;
+        TexBackend *candidate=shared_backend(t);
+        if (candidate) {
+            TexBackend *ob=candidate; NvnTexture *o=g_live[ob->reg-1];
             ob->share[ob->nshare++] = t;
             t->backend = ob;
             static int nlog;

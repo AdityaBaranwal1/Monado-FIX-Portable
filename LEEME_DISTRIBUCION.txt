@@ -1,0 +1,49 @@
+MONADO - FUENTES OPTIMIZADAS PARA COMPILAR (2026-11-04)
+
+Este ZIP conserva las fuentes modificadas, herramientas, pruebas,
+documentacion, licencias y data/variants_seed.bin (claves de estado para
+precompilacion; no contiene programas de shaders ni recursos del juego).
+No es un portable listo para jugar: no existe build/xcde.exe en esta entrega.
+No incluye el juego, partidas, configuracion personal, mods, compilaciones,
+SDK descargados, entornos Python, caches ni capturas. Se omiten backups y
+ejemplos/backends/fuentes tipograficas de ImGui que no usa esta compilacion.
+
+USO
+1. Extrae todo en una carpeta propia de Windows x64. No compiles dentro del ZIP.
+2. Instala Git for Windows si no lo tienes (Build Monado.bat usa Git Bash).
+   Lee README.md para los requisitos completos y las instrucciones manuales.
+3. Ejecuta Build Monado.bat. La preparacion instala MSYS2, sus librerias,
+   Python y los paquetes de compilacion; necesita Internet y varios GB libres.
+   Cuando lo solicite, elige la carpeta con exefs y romfs de tu propia copia
+   compatible de Xenoblade Chronicles: Definitive Edition 2.0.0.
+   Tambien puedes prepararlos en targets/exefs y targets/romfs antes de empezar.
+   Esos archivos los debe aportar cada usuario; no vienen en este ZIP.
+4. Opcional, despues de preparar Python: .venv\Scripts\python.exe tools\install_dlss.py
+   Descarga los binarios oficiales fijados por hash; requiere conexion a Internet.
+5. Tras compilar, usa Play Monado.bat. La primera preparacion de shaders puede
+   tardar. Para una integrada, prueba Patata + objetivo 30 FPS; ajustalos segun
+   los resultados de tu equipo. La calidad y el objetivo FPS son independientes.
+
+CAMBIOS INCLUIDOS
+Optimizaciones de descriptores Vulkan, texturas, lecturas RomFS y memoria
+temporal; resolucion dinamica con limites absolutos; perfiles Equilibrado,
+Rendimiento y Patata; interfaz negra/verde con bordes redondeados; diagnostico
+de rendimiento. Los nuevos recortes decorativos son optativos y experimentales.
+
+La guia actual es docs/PERFORMANCE_UI.md. Las mediciones y pruebas pendientes
+estan en docs/evidence/performance_ui_2026-11-04.md. Los documentos anteriores
+conservan el contexto de sus respectivas etapas; no sustituyen esa evidencia.
+No se garantiza una subida de FPS ni ausencia de errores en todas las GPU.
+
+INTEGRIDAD
+MANIFIESTO_SHA256.json enumera los archivos de ESTA entrega, con su tamano y
+SHA-256 (el propio manifiesto se excluye para evitar autorreferencia).
+Conserva LICENSE, NOTICE.md y las licencias de third_party al redistribuir.
+
+La compilacion predeterminada conserva Zig/MSYS2. Si falla, guarda el log
+build/build_all.log; no copies ejecutables u objetos parciales de otra version.
+La validacion local con Clang no certifica una instalacion limpia en otro PC.
+
+No compartas un portable personal que incluya archivos del juego o tus partidas.
+Crear Monado Portable.bat es para copias personales; no lo uses con sus opciones
+predeterminadas para publicar un paquete.

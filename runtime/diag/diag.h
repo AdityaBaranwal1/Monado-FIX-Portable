@@ -4,6 +4,7 @@
 //                          build/frame_hashes.txt)
 //   XCDE_INPUT_RECORD=<f>  record the pad state the game reads, one line per change: "<frame> <buttons hex> <lx> <ly> <rx> <ry>"
 //   XCDE_INPUT_REPLAY=<f>  play such a file back (a step function of the presented-frame number); overrides host input
+//   v2-ms route headers use elapsed milliseconds instead; XCDE_INPUT_TIME=1 also enables timed recording.
 //   XCDE_STRICT=1          a not-implemented SVC / IPC command / HLE function stops the game with a report (Art. VI)
 #pragma once
 #include <stdbool.h>

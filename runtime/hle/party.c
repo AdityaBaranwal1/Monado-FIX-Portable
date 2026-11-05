@@ -408,37 +408,13 @@ static void mouse_camera(uint64_t frame) {
     v[2] = v[3] = pitch;
 }
 
-// T210: frame-count thresholds of the game's logic at its own 30 fps above 30 fps. Some checks count frames, tuned
-// for 30 fps; at 60 they trip in half the time. games/xcde/patches.py routes such compares through xcde_frames_gt(n)
-// ("more than n frames at 30 fps" -> the same time at the current rate). Known one: a field follower restarts its
-// "follow while running" move when its movement component counted more than 9 frames of a condition
-// (f_70004439f0, cmp at 0x7000443b9c) - at 60 fps every ~11 frames, so followers never got past a walk and fell
-// behind (measured 2 -> 17.5 m in 200 frames at 60 fps vs a steady 6.5 m at 30).
-// g_frames_per_30: game frames per 1/30 s - the fps option at 30 / 60 (1 / 2); above (120, 144, unlimited) measured
-// on the main thread (a 60 Hz display caps a 120 setting at 60). XCDE_FRAMES30_OFF=1: off (thresholds as the game has them).
-static volatile uint32_t g_frames_per_30 = 1;
-uint32_t xcde_frames_gt(uint32_t n) { return (n + 1) * g_frames_per_30 - 1; }
-static void frames30_update(uint64_t frame) {
-    static uint64_t last = ~0ull, t_last;
-    static double avg;  // (seconds per frame, smoothed)
+// [XCDE] T249: thresholds use the measured guest update cadence, including fractional FPS.
+// Samples come from the limiter boundary, not repeated pad reads or generated presents.
+extern uint32_t xcde_frame_threshold_current(uint32_t n);
+uint32_t xcde_frames_gt(uint32_t n) {
     static int off = -1;
     if (off < 0) off = getenv("XCDE_FRAMES30_OFF") != NULL;
-    if (frame == last) return;  // (the pad is read more than once in some frames)
-    last = frame;
-    int fps = g_settings.fps;
-    uint32_t k = 1;
-    if (off || fps == 30) k = 1;
-    else if (fps == 60) k = 2;
-    else {
-        uint64_t now = plat_now_ns();
-        double dt = t_last ? (now - t_last) / 1e9 : 1.0 / 60;
-        t_last = now;
-        if (dt > 0 && dt < 0.25) avg = avg ? avg * 0.95 + dt * 0.05 : dt;
-        k = avg > 0 ? (uint32_t)(1.0 / 30 / avg + 0.5) : 1;
-        if (k < 1) k = 1;
-        if (k > 8) k = 8;
-    }
-    g_frames_per_30 = k;
+    return off ? n : xcde_frame_threshold_current(n);
 }
 
 // [XCDE] T240 debugger: map jump on request. The scripts' "mapJump" native (f_7000512b50, script binding table at
@@ -878,7 +854,6 @@ static void ent_scan(Cpu *c, uint64_t frame) {
 
 void party_game_tick(Cpu *c, uint64_t frame) {
     ent_scan(c, frame);
-    frames30_update(frame);
     debug_fixed(c, frame);
     debug_tour(c, frame);
     extern bool g_party_switch;

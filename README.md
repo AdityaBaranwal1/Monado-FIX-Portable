@@ -1,3 +1,13 @@
+# Rendimiento e interfaz — continuación local
+
+Se añadieron perfiles Equilibrado/Rendimiento/Patata, objetivos FPS independientes, optimizaciones internas y una interfaz grafito/verde. Los recortes decorativos nuevos son opcionales y experimentales. Uso, configuración, compilación y límites en [Rendimiento e interfaz](docs/PERFORMANCE_UI.md); resultados y pruebas pendientes en [evidencia local](docs/evidence/performance_ui_2026-11-04.md). No se promete una ganancia de FPS sin medición por escena/equipo.
+
+# Continuación técnica local — 2026-11-04
+
+Se añadieron selección de GPU por nombre, negociación Vulkan 1.2/1.3, correcciones de reutilización de imágenes y memoria no coherente, temporización fraccionaria y pruebas sin datos del juego. El estado comprobado y los problemas que siguen abiertos están en [validación del port](docs/PORT_VALIDATION.md). No es una nueva release ni una certificación de compatibilidad jugable.
+
+Ampliación: [selector de rutas Vulkan 1.2/1.3/1.4, DLSS automático con runtime oficial y contador FPS en pantalla](docs/VULKAN_DLSS_FPS.md).
+
 # ATENCION
 Se está encontrando la solución al crash de AMD y los bajones de fps. (resulta que son ciertos shaders pesados que hacen que falle) el proyecto original ya ofrecía una opción para omitir esos shaders aunque se necesita tiempo y testing para probar todos los shaders que causan problemas y omitirlos (el lag principal está resuelto).
 La actualización v5 se publicará con estas mejoras y ya seré feliz xd.

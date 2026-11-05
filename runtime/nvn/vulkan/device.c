@@ -14,11 +14,18 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "../../render_policy.h"
+#include "../../native_intervals.h"
+#include "gpu_probe.h"
+#include "../../cache_validation.h"
+#include "../../host/atomic_file.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 #include "../../env_cache.h"  // (last: cached getenv)
 
 VkG g_vk;
+XcdeGpu *g_vk_adapters;
+uint32_t g_vk_adapter_count;
 static SDL_Window *window;
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
@@ -67,8 +74,14 @@ static void create_instance(void) {
         }
     }
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
+    uint32_t loader = xcde_vk_loader_version();
+    if (loader < VK_API_VERSION_1_2) FATAL("[vk] Vulkan 1.2 loader required\n");
+    uint32_t max_api = loader >= VK_MAKE_API_VERSION(0, 1, 4, 0) ? VK_MAKE_API_VERSION(0, 1, 4, 0) :
+                       loader >= VK_API_VERSION_1_3 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
+    g_vk.loader_api_version = max_api;
+    g_vk.api_version = max_api; // instance supports probing all routes; device route is chosen after GPU selection
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LARecomp",
-                             .pEngineName = "LARecomp", .apiVersion = VK_API_VERSION_1_3};
+                             .pEngineName = "LARecomp", .apiVersion = g_vk.api_version};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
@@ -87,7 +100,7 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
-    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
+    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.2+ driver installed?)\n", r);
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -109,68 +122,36 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
 // Prefer a discrete GPU, but only among devices that can actually run this renderer and
 // present to the SDL surface. LARECOMP_GPU=<index> is an explicit override.
 static void pick_device(void) {
-    uint32_t n = 0;
-    VkResult vr = vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
-    if (vr != VK_SUCCESS || !n) FATAL("no Vulkan physical devices (%d)\n", vr);
-    VkPhysicalDevice *pd = calloc(n, sizeof *pd);
-    if (!pd) FATAL("out of memory enumerating Vulkan devices\n");
-    vr = vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
-    if (vr != VK_SUCCESS) { free(pd); FATAL("vkEnumeratePhysicalDevices: %d\n", vr); }
-
-    const char *gpu_env = getenv("LARECOMP_GPU");
-    int want = gpu_env && *gpu_env ? atoi(gpu_env) : g_settings.gpu_index;
-    int best = -1, best_score = -1;
-    uint32_t best_qfam = UINT32_MAX;
-    for (uint32_t i = 0; i < n; i++) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(pd[i], &props);
-        LOG("[vk] gpu %u: %s (vendor %04x device %04x driver %u, api %u.%u.%u, type %u)\n",
-            i, props.deviceName, props.vendorID, props.deviceID, props.driverVersion,
-            VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
-            VK_API_VERSION_PATCH(props.apiVersion), props.deviceType);
-        if (props.apiVersion < VK_API_VERSION_1_3) {
-            LOG("[vk]   rejected: Vulkan 1.3 is required\n");
-            continue;
-        }
-
-        uint32_t nq = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(pd[i], &nq, NULL);
-        VkQueueFamilyProperties *qp = nq ? calloc(nq, sizeof *qp) : NULL;
-        if (nq && !qp) continue;
-        if (nq) vkGetPhysicalDeviceQueueFamilyProperties(pd[i], &nq, qp);
-        uint32_t qfam = UINT32_MAX;
-        for (uint32_t q = 0; q < nq && q < 16; q++) {
-            VkBool32 present = VK_FALSE;
-            if (vkGetPhysicalDeviceSurfaceSupportKHR(pd[i], q, g_vk.surface, &present) != VK_SUCCESS) continue;
-            if (present && (qp[q].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) ==
-                               (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT) && qp[q].queueCount > 0) {
-                qfam = q;
-                break;
-            }
-        }
-        free(qp);
-        if (qfam == UINT32_MAX) {
-            LOG("[vk]   rejected: no graphics+compute+present queue\n");
-            continue;
-        }
-
-        int score = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 :
-                    props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
-        if ((int)i == want) score = 100;
-        if (score > best_score) { best_score = score; best = (int)i; best_qfam = qfam; }
+    free(g_vk_adapters);
+    g_vk_adapters = xcde_gpu_enumerate(g_vk.inst, g_vk.surface, &g_vk_adapter_count);
+    if (!g_vk_adapters || !g_vk_adapter_count) FATAL("[vk] no Vulkan devices found\n");
+    XcdeGpuInfo *infos = calloc(g_vk_adapter_count, sizeof *infos);
+    if (!infos) FATAL("[vk] cannot allocate adapter policy list\n");
+    for (uint32_t i = 0; i < g_vk_adapter_count; ++i) {
+        infos[i] = g_vk_adapters[i].info;
+        LOG("[vk] gpu %u: %s uuid=%s vendor=%04x api=%u.%u: %s\n", infos[i].index,
+            infos[i].name, infos[i].uuid, infos[i].vendor, VK_API_VERSION_MAJOR(infos[i].api),
+            VK_API_VERSION_MINOR(infos[i].api), infos[i].reason);
     }
-    if (best < 0) {
-        free(pd);
-        if (want >= 0) FATAL("LARECOMP_GPU=%d is not a usable Vulkan 1.3 device\n", want);
-        FATAL("no Vulkan 1.3 device with a graphics+compute+present queue\n");
-    }
-    if (want >= 0 && best != want)
-        LOG("[vk] requested GPU index %d is unavailable; using automatic selection\n", want);
-    g_vk.phys = pd[best];
-    g_vk.phys_index = (uint32_t)best;
-    g_vk.qfam = best_qfam;
-    free(pd);
+    bool fallback;
+    int best = xcde_gpu_choose(infos, g_vk_adapter_count, getenv("LARECOMP_GPU"),
+                               g_settings.gpu_uuid, g_settings.gpu_index, &fallback);
+    free(infos);
+    if (best < 0) FATAL("[vk] no usable GPU; see per-device capability diagnostics above\n");
+    if (fallback) LOG("[vk] requested GPU unavailable/incompatible; falling back to automatic selection\n");
+    g_vk.phys = g_vk_adapters[best].phys;
+    g_vk.phys_index = g_vk_adapters[best].info.index;
+    g_vk.qfam = g_vk_adapters[best].qfam;
+    bool route_fallback;
+    int route = xcde_vulkan_route(g_vk_adapters[best].info.vulkan_routes,
+        10 + (int)VK_API_VERSION_MINOR(g_vk.loader_api_version), g_settings.vulkan_api, &route_fallback);
+    if (!route) FATAL("[vk] selected GPU has no usable Vulkan route\n");
+    if (route_fallback) LOG("[vk] requested Vulkan route unavailable; using 1.%d\n", route - 10);
+    g_vk.api_version = VK_MAKE_API_VERSION(0, 1, route - 10, 0);
+    LOG("[vk] active GPU: %s (%s); backend Vulkan %u.%u\n", g_vk_adapters[best].info.name,
+        g_vk_adapters[best].info.uuid, VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version));
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &g_vk.memory_props);
     g_vk.driver_props = (VkPhysicalDeviceDriverProperties){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
     VkPhysicalDeviceProperties2 props2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
                                           .pNext = &g_vk.driver_props};
@@ -254,6 +235,11 @@ static void create_device(void) {
     const char *ext[48];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    bool legacy = g_vk.api_version < VK_API_VERSION_1_3;
+    if (legacy) {
+        ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+        ext[n_ext++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
+    }
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
     if (g_vk.custom_border) ext[n_ext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
     g_vk.divisor = has_ext(ep, ne, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
@@ -298,6 +284,7 @@ static void create_device(void) {
         LOG("[vk] graphics pipeline library: feature %d, fast linking %d\n", (int)gplhave.graphicsPipelineLibrary,
             (int)gp.graphicsPipelineLibraryFastLinking);
     }
+    if (legacy) gpl = false; // conservative 1.2 path: no optional 1.3 feature chains
     if (gpl) { ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME; ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME; }
     g_vk.gpl = gpl;
     free(ep);
@@ -307,10 +294,18 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ffhave = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     // [XCDE] FSR 3 (temporal.c): its shaders use half floats and, on AMD, wave64 compute where the device has them
     VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = robust2 ? &r2have : NULL};
-    VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
+    VkPhysicalDeviceSynchronization2Features sync_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+    VkPhysicalDeviceDynamicRenderingFeatures render_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+                                                            .pNext = &sync_have};
+    VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = legacy ? (void *)&render_have : (void *)&h13};
     VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12};
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    if (legacy) {
+        h13.dynamicRendering = render_have.dynamicRendering;
+        h13.synchronization2 = sync_have.synchronization2;
+    }
+    g_vk.pipeline_cache_control = !legacy && h13.pipelineCreationCacheControl;
     if (fault) {
         VkPhysicalDeviceFeatures2 fault_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ffhave};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &fault_have);
@@ -356,12 +351,17 @@ static void create_device(void) {
                                             .pipelineCreationCacheControl = h13.pipelineCreationCacheControl,  // [XCDE] T188
                                             .subgroupSizeControl = h13.subgroupSizeControl, .computeFullSubgroups = h13.computeFullSubgroups,
                                             .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+    VkPhysicalDeviceSynchronization2Features sync_enable = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
+                                                           .synchronization2 = sync_have.synchronization2,
+                                                           .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+    VkPhysicalDeviceDynamicRenderingFeatures render_enable = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+                                                             .dynamicRendering = render_have.dynamicRendering, .pNext = &sync_enable};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = h12.timelineSemaphore, .shaderInt8 = h12.shaderInt8,
                                             .samplerMirrorClampToEdge = h12.samplerMirrorClampToEdge,
                                             .uniformAndStorageBuffer8BitAccess = h12.uniformAndStorageBuffer8BitAccess,
                                             .storageBuffer8BitAccess = h12.storageBuffer8BitAccess,
-                                            .scalarBlockLayout = h12.scalarBlockLayout, .shaderFloat16 = h12.shaderFloat16, .pNext = &f13,
+                                            .scalarBlockLayout = h12.scalarBlockLayout, .shaderFloat16 = h12.shaderFloat16, .pNext = legacy ? (void *)&render_enable : (void *)&f13,
                                             .samplerFilterMinmax = h12.samplerFilterMinmax};  // [XCDE] NVN reduction filters
     g_vk.minmax = h12.samplerFilterMinmax;
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT,
@@ -405,7 +405,7 @@ static void create_device(void) {
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     // [XCDE] DLSS (dlss.cpp): Streamline's device extensions, features and queues (after ours, same family)
     uint32_t extra_g = 0, extra_c = 0;
-    {
+    if (!legacy && g_vk.props.vendorID == 0x10de) {
         extern void dlss_device_requirements(const char **ext, uint32_t *n, uint32_t max, VkPhysicalDeviceVulkan12Features *f12,
                                              VkPhysicalDeviceVulkan13Features *f13, uint32_t *extra_gfx, uint32_t *extra_compute);
         dlss_device_requirements(ext, &n_ext, 48, &f12, &f13, &extra_g, &extra_c);
@@ -466,17 +466,19 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    if (!xcde_vk_dispatch_load(&g_vk.dispatch, g_vk.dev, g_vk.api_version, vkGetDeviceProcAddr))
+        FATAL("[vk] required core/KHR dispatch entry points missing\n");
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     for (int k = 0; k < 3; k++)
         if (g_vk.fg_fam[k] != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, g_vk.fg_fam[k], g_vk.fg_idx[k], &g_vk.fg_queue[k]);
-    {   // [XCDE] DLSS: the device for Streamline; its swapchain proxies
+    if (!legacy && g_vk.props.vendorID == 0x10de) {   // [XCDE] DLSS: the device for Streamline; its swapchain proxies
         extern void dlss_device_created(VkInstance inst, VkPhysicalDevice phys, VkDevice dev, uint32_t qfam);
         dlss_device_created(g_vk.inst, g_vk.phys, g_vk.dev, g_vk.qfam);
         sc_proxies();
     }
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = VK_API_VERSION_1_3,
+                                 .vulkanApiVersion = g_vk.api_version > VK_API_VERSION_1_3 ? VK_API_VERSION_1_3 : g_vk.api_version,
                                  .flags = budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
@@ -514,10 +516,15 @@ static void create_device(void) {
         }
         fclose(fp);
     }
+    if (data && !xcde_pipeline_cache_valid(data, sz, g_vk.props.vendorID, g_vk.props.deviceID, g_vk.props.pipelineCacheUUID)) {
+        LOG("[vk] pipeline cache ignored: stale driver/GPU UUID or malformed header\n");
+        free(data); data = NULL; sz = 0;
+    }
     VkPipelineCacheCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = sz,
                                     .pInitialData = data};
     if (vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache) != VK_SUCCESS) {
         pc.initialDataSize = 0;
+        pc.pInitialData = NULL;
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
     }
     free(data);
@@ -562,8 +569,8 @@ void vk_pipeline_cache_save(void) {
         FILE *f = fopen(tmp, "wb");
         if (f) {
             bool ok = fwrite(data, 1, sz, f) == sz;
-            fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename(tmp, "cache/vk_pipelines.bin"); }
+            if (fclose(f) != 0) ok = false;
+            if (ok) { if (!xcde_atomic_replace(tmp, "cache/vk_pipelines.bin")) remove(tmp); }
             else remove(tmp);
         }
     }
@@ -621,6 +628,7 @@ float vk_display_hz(void) {
     return hz;
 }
 
+extern int xcde_present_fps(void);
 static int repeat_presents(void) {
     static int off = -1;
     if (off < 0) off = getenv("XCDE_REPEAT_PRESENT") && atoi(getenv("XCDE_REPEAT_PRESENT")) == 0;
@@ -813,6 +821,9 @@ void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
     VkCommandBuffer cb = vk_cmd();
     vkCmdEndRendering(cb);
+    // T252: present may recreate the swapchain. Readback dimensions/format belong to this image.
+    uint32_t shot_w = g_vk.sc_extent.width, shot_h = g_vk.sc_extent.height;
+    VkFormat shot_format = g_vk.sc_format;
     VkSpan shot = {0};
     extern bool diag_flicker_wanted(void);
     bool hash_it = diag_hash_wanted() || diag_flicker_wanted();  // [XCDE] T029: per-frame hash of the window image (+ T173 flicker check)
@@ -834,9 +845,9 @@ void vk_frame_end(const char *shot_path) {
     cur_frame.ok = false;
     if (shot_path || hash_it) {
         vk_wait_seq(seq);
-        uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
+        uint32_t w = shot_w, h = shot_h;
         uint8_t *px = shot.ptr;
-        bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
+        bool bgr = shot_format == VK_FORMAT_B8G8R8A8_UNORM || shot_format == VK_FORMAT_B8G8R8A8_SRGB;
         for (uint64_t i = 0; bgr && i < (uint64_t)w * h; i++) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
         for (uint64_t i = 0; i < (uint64_t)w * h; i++) px[i * 4 + 3] = 255;
         if (diag_hash_wanted()) diag_frame_hash(diag_frame() + 1, px, w, h);
@@ -1114,6 +1125,10 @@ static void rec_frame(TexBackend *b) {
 }
 
 void backend_present(NvnTexture *t) {
+    // T260: a repeat may consume only unused budget, never delay an already-late native frame.
+    static uint64_t native_cycle_start;
+    uint64_t native_now=SDL_GetTicksNS();
+    if (!native_cycle_start || native_now-native_cycle_start>250000000ull) native_cycle_start=native_now;
     {   // [XCDE] T240 XCDE_TRACE_PRESENT=<from>:<to>: each presented frame's texture and the draws since the last present
         // (a frame shown out of order: was the image drawn that frame, or an older one presented again?)
         static long tf = -1, tt;
@@ -1209,7 +1224,7 @@ void backend_present(NvnTexture *t) {
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
         // no GPU timer here (-1): dynamic resolution goes by the frame time
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, vk_native_gpu_ms(), &os);
         double sx = os.sx, sy = os.sy, shape = os.shape;
         vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
@@ -1226,6 +1241,7 @@ void backend_present(NvnTexture *t) {
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
+        menu_fps_tick(SDL_GetTicksNS()); // once per native frame, outside repeat/FG paths
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         vk_frame_end(shot ? "build/window.png" : xshot);
         {   // XCDE_PRESENT_STATS=1: game frame intervals (first present of each), every 120 frames
@@ -1247,7 +1263,8 @@ void backend_present(NvnTexture *t) {
             }
             lastp = now;
         }
-        for (int k = repeat_presents(); k > 1; k--) {  // (see repeat_presents)
+        for (int k = repeat_presents(); k > 1; k--) {
+            if (!xcde_repeat_has_budget(native_cycle_start, SDL_GetTicksNS(), xcde_present_fps(), vk_display_hz())) break;  // (see repeat_presents)
             extern void vk_present_redraw(VkCommandBuffer cb);
             if (!vk_frame_begin(black)) break;
             vk_present_redraw(vk_cmd());
@@ -1262,6 +1279,9 @@ void backend_present(NvnTexture *t) {
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
+    xcde_native_interval(total_frames,SDL_GetTicksNS(),g_vk.props.deviceName,g_vk.props.driverVersion,xshot!=NULL || shot);
+    vk_metrics_frame(total_frames, SDL_GetTicksNS(), SDL_GetTicksNS()-t0);
+    native_cycle_start=SDL_GetTicksNS();
     frames++;
     total_frames++;
     g_frame_counter++;
@@ -1432,9 +1452,17 @@ void ui_window_init(void) {
         dlss_init_early();
     }
     create_instance();
-    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    extern bool dlss_create_surface(void *window, VkInstance instance, VkSurfaceKHR *surface);
+    if (!dlss_create_surface(window, g_vk.inst, &g_vk.surface) && !SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
+    { extern void dlss_validate_adapter(VkPhysicalDevice phys, uint32_t api, uint32_t qfam);
+      dlss_validate_adapter(g_vk.phys, g_vk.api_version, g_vk.qfam); }
     create_device();
+    if (g_settings.upscaler_auto || g_settings.upscaler == UPSCALE_DLSS) {
+        extern bool dlss_available(void);
+        g_settings.upscaler = dlss_available() ? UPSCALE_DLSS : UPSCALE_FSR1;
+        LOG("[upscaler] auto selected %s\n", dlss_available() ? "DLSS SR" : "FSR 1 spatial");
+    }
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();

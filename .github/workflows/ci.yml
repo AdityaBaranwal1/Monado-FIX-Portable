@@ -17,3 +17,17 @@ jobs:
         run: python -X utf8 -W error::ResourceWarning -m unittest discover -s tests/unit -v
       - name: Packaging guard over tracked files (Constitution art. I)
         run: python -X utf8 tools/package_guard.py --git .
+  windows-components:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Project-local compiler and test dependencies (no game data)
+        run: python -m pip install --target build/toolchain ziglang==0.13.0 capstone==5.0.9 lz4==4.4.5 unicorn==2.1.4
+      - name: Official project-local validation SDK
+        run: python tools/setup_validation.py
+      - name: Windows runtime components, launcher and native regressions
+        run: python tools/validate_port.py --build-ui

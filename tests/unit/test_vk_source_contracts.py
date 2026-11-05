@@ -24,9 +24,10 @@ class VulkanSourceContracts(unittest.TestCase):
         self.assertIn("!h12.timelineSemaphore", DEVICE)
 
     def test_automatic_selection_filters_devices_by_queue_capabilities(self):
-        self.assertIn("best_qfam", DEVICE)
-        self.assertIn("VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT", DEVICE)
-        self.assertIn("vkGetPhysicalDeviceSurfaceSupportKHR", DEVICE)
+        probe = (ROOT / "runtime/nvn/vulkan/gpu_probe.h").read_text(encoding="utf-8")
+        self.assertIn("xcde_gpu_enumerate", DEVICE)
+        self.assertIn("VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT", probe)
+        self.assertIn("vkGetPhysicalDeviceSurfaceSupportKHR", probe)
         self.assertIn("LARECOMP_GPU", DEVICE)
 
     def test_pipeline_cache_input_is_bounded_and_allocation_checked(self):

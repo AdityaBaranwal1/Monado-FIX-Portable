@@ -1,3 +1,7 @@
+#include "../../staging_copy.h"
+#include "../../render_policy.h"
+#include "../../descriptor_cache.h"
+#include "../../resource_policy.h"
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include "../../diag/diag.h"
 #include "../../kernel.h"
@@ -51,6 +55,8 @@ static void skip_note(int line) {
 }
 #define SKIPPED() (stat_skipped++, skip_note(__LINE__))
 static uint64_t stat_upload_bytes;
+static XcdeDescriptorEntry descriptor_cache[XCDE_DESC_SLOTS];
+static uint64_t metric_desc_hits, metric_desc_updates, metric_gmem_upload, metric_gmem_readback;
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
@@ -81,12 +87,48 @@ void vk_collect_dead(void);
 #define SUBS 8
 typedef struct {
     VkCommandBuffer main, upload;
-    bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
+    bool main_begun, upload_begun, ts, upload_ts;  // ts: GPU timestamps written (profiling)
     uint64_t seq;
+    uint64_t gpu_frame; // T260: native frame owning this timestamp pair
     VkDescriptorPool pools[16];
     int npools, cur_pool;
 } Sub;
+uint64_t renderer_present_count(void);
 static Sub subs[SUBS];
+static struct { uint64_t tag, ns; } gpu_frames[32];
+static uint64_t gpu_last_tag;
+static double gpu_last_ms=-1;
+static unsigned gpu_timestamp_bits;
+static bool compile_jobs_pending(void);
+static void resolve_gpu_time(Sub *s, int index) {
+    if (!s->ts) return;
+    uint64_t t[4];
+    if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)index*4, s->upload_ts ? 4 : 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT)!=VK_SUCCESS) return;
+    uint64_t ticks=xcde_timestamp_delta(t[0],t[1],gpu_timestamp_bits);
+    if (s->upload_ts) ticks+=xcde_timestamp_delta(t[2],t[3],gpu_timestamp_bits);
+    uint64_t ns=(uint64_t)(ticks*g_vk.props.limits.timestampPeriod);
+    unsigned slot=(unsigned)(s->gpu_frame%32);
+    if (gpu_frames[slot].tag!=s->gpu_frame+1) gpu_frames[slot].tag=s->gpu_frame+1, gpu_frames[slot].ns=0;
+    gpu_frames[slot].ns+=ns;
+    if (prof) prof_gpu+=ns;
+    s->ts=false;
+}
+double vk_native_gpu_ms(void) {
+    // T260: only completed submissions; no WAIT flag or extra timeline wait. Sum every piece of a native frame.
+    if (!prof && g_settings.res_mode!=RES_DYNAMIC) return -1;
+    if (compile_jobs_pending()) return -2; // T260: resolution cannot fix first-use compiler stalls
+    if (!prof_qp) return -1;
+    uint64_t done=vk_completed_seq(), frame=renderer_present_count();
+    for (int i=0;i<SUBS;i++) if (subs[i].ts && subs[i].seq<=done) resolve_gpu_time(&subs[i],i);
+    for (unsigned j=0;j<32;j++) {
+        uint64_t tag=gpu_frames[j].tag;
+        if (!tag || tag<=gpu_last_tag || tag>frame) continue;
+        bool pending=false;
+        for (int i=0;i<SUBS;i++) if (subs[i].ts && subs[i].gpu_frame+1==tag) pending=true;
+        if (!pending) { gpu_last_tag=tag; gpu_last_ms=gpu_frames[j].ns/1e6; }
+    }
+    return gpu_last_tag && frame+1-gpu_last_tag<=12 ? gpu_last_ms : -1;
+}
 static int cur_sub;
 static void ss_forget(void);
 static void dyn_defaults(VkCommandBuffer cb);
@@ -123,6 +165,11 @@ static void wait_account(uint64_t ns) {
 
 static void cq_resolve_done(uint64_t done);
 
+// T252: the render thread owns readback memory; other waiters must not touch its cache state.
+static void readback_sync(uint64_t completed);
+static void ring_flush(uint64_t pending);
+// [PERF-V5] the host-read barrier is only needed on submissions that really carry a GPU->CPU readback / guest-heap store
+static atomic_bool host_read_pending;
 void vk_wait_seq(uint64_t seq) {
     if (!seq) { wait_why = NULL; return; }
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
@@ -141,7 +188,7 @@ void vk_wait_seq(uint64_t seq) {
         extern void vk_devlost_dump(void);
         vk_devlost_dump();
         FATAL("[vk] GPU did not finish submission %llu within 10 s (hang or device lost)\n", (unsigned long long)seq);
-    } else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
+    } else if (r == VK_SUCCESS) { readback_sync(seq); cq_resolve_done(seq); }  // (the game reads its timing counters after waiting)
     else {
         extern void vk_devlost_dump(void);
         vk_devlost_dump();
@@ -378,16 +425,11 @@ static Sub *sub(void) {
         wait_why = "ring slot";
         vk_wait_seq(s->seq);
         cq_resolve_done(s->seq);
-        if (s->ts) {  // (profiling) GPU time of that submission
-            uint64_t t[2];
-            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
-                prof_gpu += (uint64_t)((double)(t[1] - t[0]) * g_vk.props.limits.timestampPeriod);
-            s->ts = false;
-        }
+        resolve_gpu_time(s,cur_sub);
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
         s->cur_pool = 0;
         s->seq = submit_seq + 1;
-        s->main_begun = s->upload_begun = false;
+        s->main_begun = s->upload_begun = s->upload_ts = false;
     }
     return s;
 }
@@ -403,6 +445,8 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
     VK_CHECK(vkBeginCommandBuffer(*cb, &bi));
     *begun = true;
 }
+
+void vk_external_state_changed(void) { ss_forget(); dyn_defaults(vk_cmd()); }
 
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
 VkCommandBuffer vk_cmd(void) {
@@ -454,9 +498,10 @@ VkCommandBuffer vk_cmd(void) {
             if (q->pool) vkCmdResetQueryPool(s->main, q->pool, 0, CK_MAX);
         }
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
-        if (prof && prof_qp) {
-            vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
-            vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
+        if (prof_qp && (prof || g_settings.res_mode==RES_DYNAMIC)) {
+            vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 4, 2);
+            vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, prof_qp, (uint32_t)cur_sub * 4);
+            s->gpu_frame=renderer_present_count();
             s->ts = true;
         }
     }
@@ -467,6 +512,11 @@ VkCommandBuffer vk_upload_cmd(void) {
     Sub *s = sub();
     if (!s->upload_begun) {
         begin_cb(&s->upload, &s->upload_begun);
+        if (prof_qp && (prof || g_settings.res_mode==RES_DYNAMIC)) {
+            vkCmdResetQueryPool(s->upload,prof_qp,(uint32_t)cur_sub*4+2,2);
+            vkCmdWriteTimestamp2(s->upload,VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,prof_qp,(uint32_t)cur_sub*4+2);
+            s->upload_ts=true;
+        }
         // after everything submitted before it: a submission's commands may start while the previous one's still run,
         // and these copies overwrite what those may read (textures being replaced, vertex cache pages)
         vk_full_barrier(s->upload);
@@ -552,13 +602,24 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     VkCommandBufferSubmitInfo cbs[2];
     int n = 0;
     vc_flush();
+    ring_flush(submit_seq + 1);
     if (s->upload_begun) {
         vk_full_barrier(s->upload);  // uploads complete before anything in the main buffer reads them
+        if (s->upload_ts) vkCmdWriteTimestamp2(s->upload,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,prof_qp,(uint32_t)cur_sub*4+3);
         VK_CHECK(vkEndCommandBuffer(s->upload));
         cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
     }
     vk_cmd();  // (an empty main buffer still carries the semaphores)
-    if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 2 + 1);
+    if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 4 + 1);
+    // T252: make shader/transfer writes visible to the host after the timeline wait.
+    // [PERF-V5] was unconditional on every submit (a full ALL_COMMANDS -> HOST flush); now only when this submission has host reads.
+    if (atomic_exchange(&host_read_pending, false)) {
+        VkMemoryBarrier2 host_read = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+        VkDependencyInfo host_dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &host_read};
+        vkCmdPipelineBarrier2(s->main, &host_dep);
+    }
     VK_CHECK(vkEndCommandBuffer(s->main));
     cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
     VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_vk.timeline,
@@ -665,10 +726,25 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
 static Chunk *chunks;
 static int nchunks, active = -1;
+static _Thread_local VmaAllocation readback_allocation;
+static _Thread_local uint64_t readback_seq;
+static void ring_flush(uint64_t pending) {
+    for (int i = 0; i < nchunks; ++i)
+        if (chunks[i].seq == pending && chunks[i].used)
+            VK_CHECK(vmaFlushAllocation(g_vk.vma, chunks[i].mem, 0, chunks[i].used));
+}
+static void readback_sync(uint64_t completed) {
+    if (readback_allocation && readback_seq && readback_seq <= completed) {
+        VK_CHECK(vmaInvalidateAllocation(g_vk.vma, readback_allocation, 0, VK_WHOLE_SIZE));
+        readback_seq = 0;
+    }
+}
 static int ring_chunks(void) { return nchunks; }
 
 static int new_chunk(uint64_t size) {
-    chunks = realloc(chunks, (nchunks + 1) * sizeof *chunks);
+    Chunk *expanded = realloc(chunks, (nchunks + 1) * sizeof *chunks);
+    if (!expanded) FATAL("[vk] cannot grow transient allocation tracking\n");
+    chunks = expanded;
     Chunk *c = &chunks[nchunks];
     memset(c, 0, sizeof *c);
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
@@ -738,6 +814,8 @@ VkSpan vk_readback(uint64_t size) {
         VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &mem, &info));
         ptr = info.pMappedData;
     }
+    readback_allocation = mem; readback_seq = vk_pending_seq();
+    atomic_store(&host_read_pending, true);
     return (VkSpan){buf, 0, ptr};
 }
 
@@ -810,6 +888,9 @@ static int big_stack_thread(pthread_t *t, void *(*fn)(void *)) {
 
 // [XCDE] T240: build work not done yet (vk_prewarm_hold): normal jobs queued / running, translations queued / running
 static _Atomic int g_jobs_queued, g_jobs_busy, g_xlat_queued;
+static bool compile_jobs_pending(void) {
+    return atomic_load(&g_jobs_queued)>0 || atomic_load(&g_jobs_busy)>0 || atomic_load(&g_xlat_queued)>0;
+}
 static void *worker(void *a) {
     (void)a;
     { extern void plat_thread_name(const char *), plat_thread_background(void); plat_thread_name("shader worker"); plat_thread_background(); }
@@ -883,6 +964,7 @@ static void run_translate(void (*fn)(void *), void *arg) {
     static bool started;
     if (!started) { started = true; pthread_t t; big_stack_thread(&t, translator); }
     Job *j = malloc(sizeof *j);
+    if (!j) FATAL("[vk] cannot allocate shader worker job\n");
     j->fn = fn; j->arg = arg; j->next = NULL;
     atomic_fetch_add(&g_xlat_queued, 1);
     pthread_mutex_lock(&tjobs_lock);
@@ -900,17 +982,16 @@ static void run_job(void (*fn)(void *), void *arg) {
         started = true;
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
         extern int plat_cpu_count(void);
-        int cpus = plat_cpu_count(), n = cpus - 4;  // (the process's own CPUs: the low-spec test mode narrows them)
-        if (n < 4) n = 4;
-        // [XCDE] R4 (docs/spec_lowend_gpu.md): on 6 logical CPUs or fewer (Ryzen 3 3200G: 4) leave two to the game and
-        // render threads (SpartanPort 4b843a7: workers starved the GPU thread of a 4-thread i5, 36 -> 59 fps)
-        if (cpus <= 6) n = cpus - 2 < 2 ? 2 : cpus - 2;
+        int cpus = plat_cpu_count();
+        int n = xcde_shader_workers(cpus, SDL_GetSystemRAM(),
+                  g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, g_settings.gpu_performance);
         static int logged;
         if (!logged++) LOG("[vk] %d shader workers (%d logical CPUs)\n", n, cpus);
         if (n > 16) n = 16;
         for (int i = 0; i < n; i++) { pthread_t t; big_stack_thread(&t, worker); }
     }
     Job *j = malloc(sizeof *j);
+    if (!j) FATAL("[vk] cannot allocate shader worker job\n");
     j->fn = fn; j->arg = arg; j->next = NULL;
     atomic_fetch_add(&g_jobs_queued, 1);
     pthread_mutex_lock(&jobs_lock);
@@ -924,6 +1005,7 @@ static void run_job(void (*fn)(void *), void *arg) {
 // worker's own job, so the workers exist.
 static void run_job_low(void (*fn)(void *), void *arg) {
     Job *j = malloc(sizeof *j);
+    if (!j) FATAL("[vk] cannot allocate shader worker job\n");
     j->fn = fn; j->arg = arg; j->next = NULL;
     pthread_mutex_lock(&jobs_lock);
     if (ljobs_tail) ljobs_tail->next = j; else ljobs_head = j;
@@ -990,7 +1072,7 @@ static int amd_igpu_heavy_skip(void) {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("XCDE_AMD_KEEP_HEAVY");
-        v = !(e && atoi(e)) && g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+        v = !(e ? atoi(e) : g_settings.gpu_keep_heavy) && g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
     }
     return v;
 }
@@ -998,7 +1080,7 @@ static bool pipe_wait_over_budget(void) {
     static int64_t lim_ms = -1;
     if (lim_ms < 0) {
         const char *e = getenv("XCDE_PIPE_WAIT_MS");
-        lim_ms = e ? atoi(e) : (g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 40 : 0);
+        lim_ms = e ? atoi(e) : 0; // T260: correctness by default; never hide geometry to satisfy a compile budget.
         if (lim_ms < 0) lim_ms = 0;
         if (lim_ms) LOG("[vk] pipeline wait budget: %lld ms per frame (XCDE_PIPE_WAIT_MS=0: off)%c", (long long)lim_ms, 10);
     }
@@ -1190,10 +1272,18 @@ static void st_defaults(void) {
 }
 
 void vk_exec_init(void) {
-    prof = getenv("LARECOMP_VK_PROF") != NULL;
-    if (prof) {
+    prof = getenv("LARECOMP_VK_PROF") != NULL || getenv("XCDE_METRICS") != NULL;
+    uint32_t nq=0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys,&nq,NULL);
+    VkQueueFamilyProperties *queues=calloc(nq,sizeof *queues);
+    if (queues) {
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys,&nq,queues);
+        if (g_vk.qfam<nq) gpu_timestamp_bits=queues[g_vk.qfam].timestampValidBits;
+        free(queues);
+    }
+    if (gpu_timestamp_bits && !(getenv("XCDE_GPU_TIMING") && !atoi(getenv("XCDE_GPU_TIMING")))) {
         prof_up_ns = 0;
-        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 4};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
     st_defaults();
@@ -1244,9 +1334,26 @@ static struct {
     VkRect2D sc;
     VkBuffer ib; VkDeviceSize io; VkIndexType it;
     VkBuffer vb[17]; VkDeviceSize vo[17], vsz[17];
+    VkPipelineLayout descriptor_layout;
+    VkDescriptorSet descriptor_sets[3];
+    unsigned descriptor_known;
 } ss;
 static int ss_on = -1;
-static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
+static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; ss.descriptor_known=0; }
+static void vk_bind_graphics_sets(VkCommandBuffer cb, VkPipelineBindPoint point, VkPipelineLayout layout,
+                                 uint32_t first, uint32_t count, const VkDescriptorSet *sets,
+                                 uint32_t dynamic_count, const uint32_t *offsets) {
+    bool same=ss.descriptor_layout==layout && first+count<=3 && !dynamic_count;
+    for (unsigned i=0;same && i<count;i++)
+        same=(ss.descriptor_known&(1u<<(first+i))) && ss.descriptor_sets[first+i]==sets[i];
+    if (same) return;
+    vkCmdBindDescriptorSets(cb,point,layout,first,count,sets,dynamic_count,offsets);
+    if (ss.descriptor_layout!=layout || dynamic_count) ss.descriptor_known=0;
+    ss.descriptor_layout=layout;
+    if (!dynamic_count) for (unsigned i=0;i<count && first+i<3;i++) {
+        ss.descriptor_sets[first+i]=sets[i]; ss.descriptor_known|=1u<<(first+i);
+    }
+}
 static bool ss_enabled(void) {
     if (ss_on < 0) { const char *e = getenv("LARECOMP_VK_STATE_FILTER"); ss_on = !e || atoi(e) != 0; }
     return ss_on;
@@ -2833,8 +2940,19 @@ static void pipe_evict(void) {  // (render thread)
         Pipe *pp = pipe_tab.e[i].val;
         if (pp && atomic_load(&pp->state) != 3) pipe_live++;
     }
-    if (pipe_live <= (uint32_t)budget) return;
+    int effective_budget = budget;
+    VmaBudget heaps[VK_MAX_MEMORY_HEAPS];
+    VkPhysicalDeviceMemoryProperties memory;
+    vmaGetHeapBudgets(g_vk.vma, heaps);
+    memory = g_vk.memory_props;
+    for (uint32_t i = 0; i < memory.memoryHeapCount && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; ++i)  // [PERF-V5] not on UMA iGPUs
+        if (heaps[i].budget && heaps[i].usage > heaps[i].budget - heaps[i].budget / 10) {
+            effective_budget = budget * 3 / 4; break;
+        }
+    if (effective_budget < 1) effective_budget = 1;
+    if (pipe_live <= (uint32_t)effective_budget) return;
     Pipe **c = malloc(pipe_live * sizeof *c);
+    if (!c) return;
     uint32_t nc = 0;
     for (uint32_t i = 0; i < pipe_tab.cap; i++) {
         Pipe *pp = pipe_tab.e[i].val;
@@ -2842,10 +2960,15 @@ static void pipe_evict(void) {  // (render thread)
             c[nc++] = pp;
     }
     qsort(c, nc, sizeof *c, pe_cmp);
-    uint32_t want = pipe_live - (uint32_t)budget * 9 / 10, n = want < nc ? want : nc;
+    uint32_t want = pipe_live - (uint32_t)effective_budget * 9 / 10, n = want < nc ? want : nc;
     uint64_t seq = vk_pending_seq();  // (lists recorded until now may use them)
     for (uint32_t i = 0; i < n; i++) {
-        if (pe_ndead == pe_cap) { pe_cap = pe_cap ? pe_cap * 2 : 1024; pe_dead = realloc(pe_dead, pe_cap * sizeof *pe_dead); }
+        if (pe_ndead == pe_cap) {
+            size_t next_cap = pe_cap ? pe_cap * 2 : 1024;
+            void *next_dead = realloc(pe_dead, next_cap * sizeof *pe_dead);
+            if (!next_dead) { n = i; break; } // keep existing handles alive if retirement bookkeeping cannot grow
+            pe_dead = next_dead; pe_cap = next_cap;
+        }
         pe_dead[pe_ndead].p = c[i]->pipe;
         memcpy(pe_dead[pe_ndead].libs, c[i]->libs, sizeof c[i]->libs);
         memset(c[i]->libs, 0, sizeof c[i]->libs);
@@ -2914,7 +3037,7 @@ static void build_pipeline_(void *arg) {
         if (precompiled < 0) { FILE *pf = fopen("cache/precompile_done.txt", "r"); precompiled = pf != NULL; if (pf) fclose(pf); }
         if ((pp->how & 0x80) && precompiled && !det_gpl) libs_ready = false;
         r = det_gpl || libs_ready ? VK_PIPELINE_COMPILE_REQUIRED
-                                  : pipeline_whole(&pp->k, VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, &p);
+                                  : pipeline_whole(&pp->k, g_vk.pipeline_cache_control ? VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT : 0, &p);
         if (r == VK_SUCCESS) {
             atomic_fetch_add(&stat_gpl_cached, 1);
             atomic_fetch_add(&hc_cached_ns, SDL_GetTicksNS() - pp->t_b0); atomic_fetch_add(&hc_cached_n, 1);
@@ -3838,6 +3961,8 @@ static void resolve_feedback(Prog *pr) {
             // the prologue route, captures identical (max 2/255 on 0.2 % of one frame), battle 23.8 -> 27.7 fps
             // (deterministic), validation layers quiet. LARECOMP_FEEDBACK_DIRECT=0: snapshots again. Depth: unchanged.
             static int direct = -1;
+            // T252 made snapshots the default on every vendor. [PERF-V5] the direct path (V4 behaviour, +16 % in battle) is the
+            // default again on ALL vendors. LARECOMP_FEEDBACK_DIRECT=0 brings the snapshots back (if blue textures / flicker appear).
             if (direct < 0) { const char *e = getenv("LARECOMP_FEEDBACK_DIRECT"); direct = !e || atoi(e) != 0; }
             if (direct && t != st.rt.depth) continue;
             bool have = false;
@@ -4014,22 +4139,35 @@ static bool gmem_import(uint64_t size) {
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                             .pHostPointer = (void *)(uintptr_t)HEAP_BASE};
-    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
-                               .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
-    VkDeviceMemory mem;
-    if (vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) != VK_SUCCESS) return false;
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
     VkBuffer buf;
-    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
-    vkBindBufferMemory(g_vk.dev, buf, mem, 0);
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements requirements;
+    vkGetBufferMemoryRequirements(g_vk.dev, buf, &requirements);
+    uint32_t compatible = mp.memoryTypeBits & requirements.memoryTypeBits;
+    VkPhysicalDeviceMemoryProperties memory;
+    memory = g_vk.memory_props;
+    // CPU changes to imported memory are observed directly: prefer coherent types. [PERF-V5] but do not give up the import when
+    // the driver exposes none (V4 took the first compatible type); failing here sends every gmem shader to the whole-heap staging copy.
+    uint32_t coherent = compatible;
+    for (uint32_t i = 0; i < memory.memoryTypeCount; ++i)
+        if (!(memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) coherent &= ~(1u << i);
+    if (coherent) compatible = coherent;
+    else LOG("[vk] guest heap import: no host-coherent memory type, using the first compatible one\n");
+    if (!compatible || requirements.size > size) { vkDestroyBuffer(g_vk.dev, buf, NULL); return false; }
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = requirements.size,
+                               .memoryTypeIndex = (uint32_t)__builtin_ctz(compatible)};
+    VkDeviceMemory mem;
+    if (vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) != VK_SUCCESS) { vkDestroyBuffer(g_vk.dev, buf, NULL); return false; }
+    if (vkBindBufferMemory(g_vk.dev, buf, mem, 0) != VK_SUCCESS) {
+        vkDestroyBuffer(g_vk.dev, buf, NULL); vkFreeMemory(g_vk.dev, mem, NULL); return false;
+    }
     if (gmem_buf) {  // the heap grew: the old import may still be in use by submitted work
-        vk_wait_seq(submit_seq);
-        vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
-        vkFreeMemory(g_vk.dev, gmem_mem, NULL);
+        vk_defer_import(gmem_buf, gmem_mem); // T254: current unsubmitted draws may still refer to it
     }
     gmem_buf = buf;
     gmem_mem = mem;
@@ -4047,13 +4185,68 @@ static VkDescriptorBufferInfo gmem_info(void) {
     uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
     if (want > HEAP_MAX) want = HEAP_MAX;
     if (!off && want > gmem_size && !gmem_import(want)) {
-        LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
+        LOG("[vk] guest heap import failed (%llu MB): using staging for shader global memory\n", (unsigned long long)(want >> 20));
         off = 1;
     }
-    if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size};
+    // [PERF-V5] a descriptor range above maxStorageBufferRange is invalid (Intel HD: 1 GiB): bind the first window only.
+    if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size > g_vk.props.limits.maxStorageBufferRange ? g_vk.props.limits.maxStorageBufferRange : gmem_size};
     static uint32_t zero[1024];
     VkSpan s = vk_transient_copy(zero, sizeof zero, 256);
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof zero};
+}
+
+// [XCDE] T254: correctness-first fallback when host import is absent/fails. Vertex/index
+// uploads already use bounded transient copies. Global-memory shaders need a shared heap
+// snapshot with write-back, not the old all-zero dummy. Windowed shader addressing for heaps
+// larger than maxStorageBufferRange is still required on some Intel/older drivers.
+static struct { VkBuffer buf; VmaAllocation mem; uint64_t size, seq; uint32_t generation; VkSpan before; bool used; } gmem_stage;
+static VkDescriptorBufferInfo gmem_shader_info(void) {
+    VkDescriptorBufferInfo imported = gmem_info();
+    uint64_t size = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
+    if (size > HEAP_MAX) size = HEAP_MAX;
+    if (!size || getenv("LARECOMP_VK_NO_GMEM")) return imported; // explicit diagnostic switch
+    if (size > g_vk.props.limits.maxStorageBufferRange) {
+        // [PERF-V5] was FATAL (the game closed on Intel HD, 1 GiB limit). Windowed addressing is not implemented, so
+        // shaders only see the first maxStorageBufferRange bytes of the heap: possible glitches in global-memory effects, but it runs.
+        static int warned;
+        if (!warned++) LOG("[gmem] heap %llu MiB exceeds maxStorageBufferRange %u MiB on %s: using the first window only\n",
+            (unsigned long long)(size >> 20), g_vk.props.limits.maxStorageBufferRange >> 20, g_vk.props.deviceName);
+        size = g_vk.props.limits.maxStorageBufferRange & ~0xFFFFull;
+    }
+    if (gmem_buf) return imported;
+    uint64_t seq = vk_pending_seq();
+    if (gmem_stage.seq != seq || gmem_stage.generation != gcopy_gen || gmem_stage.size != size) {
+        // A fresh buffer avoids changing the snapshot of earlier, still-pending draws.
+        if (gmem_stage.buf) vk_defer_buffer(gmem_stage.buf, gmem_stage.mem);
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &gmem_stage.buf, &gmem_stage.mem, NULL));
+        gmem_stage.before = vk_transient_copy((const void *)(uintptr_t)HEAP_BASE, size, 256);
+        metric_gmem_upload+=size;
+        VkBufferCopy copy = {gmem_stage.before.off, 0, size};
+        vkCmdCopyBuffer(vk_upload_cmd(), gmem_stage.before.buf, gmem_stage.buf, 1, &copy);
+        gmem_stage.size = size; gmem_stage.seq = seq; gmem_stage.generation = gcopy_gen;
+        static int logged;
+        if (!logged++) LOG("[gmem] staging fallback: %llu MiB per snapshot; slower than host import\n", (unsigned long long)(size >> 20));
+    }
+    gmem_stage.used = true;
+    return (VkDescriptorBufferInfo){gmem_stage.buf, 0, size};
+}
+static void gmem_stage_finish(bool stores) {
+    if (!gmem_stage.used) return;
+    gmem_stage.used = false;
+    if (!stores) return;
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkSpan result = vk_readback(gmem_stage.size);
+    metric_gmem_readback+=gmem_stage.size;
+    VkBufferCopy copy = {0, result.off, gmem_stage.size};
+    vkCmdCopyBuffer(cb, gmem_stage.buf, result.buf, 1, &copy);
+    renderer_flush(); // copy and host-visibility barrier finish before CPU merge
+    xcde_merge_gpu_words((uint32_t *)(uintptr_t)HEAP_BASE, gmem_stage.before.ptr, result.ptr, (size_t)(gmem_stage.size / 4));
+    gmem_stage.seq = 0; guest_copy_flush();
 }
 
 // Compute dispatches that use global memory: the imported heap is host memory across PCIe on a discrete GPU, and a
@@ -4551,6 +4744,9 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+    memset(descriptor_cache,0,sizeof descriptor_cache);
+    memset(gpu_frames,0,sizeof gpu_frames); gpu_last_tag=0; gpu_last_ms=-1;
+    for (int i=0;i<SUBS;i++) subs[i].ts=subs[i].upload_ts=false;
     if (prog_tab.cap) memset(prog_tab.e, 0, prog_tab.cap * sizeof *prog_tab.e);
     if (pipe_tab.cap) memset(pipe_tab.e, 0, pipe_tab.cap * sizeof *pipe_tab.e);
     prog_tab.n = pipe_tab.n = 0;
@@ -4566,6 +4762,8 @@ void vk_exec_reset(void) {
         gmem_buf = VK_NULL_HANDLE;
         gmem_mem = VK_NULL_HANDLE;
     }
+    if (gmem_stage.buf) vmaDestroyBuffer(g_vk.vma, gmem_stage.buf, gmem_stage.mem);
+    memset(&gmem_stage, 0, sizeof gmem_stage);
     gmem_size = gmem_tried = 0;
     for (int i = 0; i < VC_TAB; i++)  // (the vertex cache: copies of the old pages)
         if (vc_tab[i].buf) vmaDestroyBuffer(g_vk.vma, vc_tab[i].buf, vc_tab[i].mem);
@@ -4714,7 +4912,7 @@ static float g_mirror_w;  // mirror mode's composite: its render target width (r
 
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
-    VkDescriptorSet ds = vk_alloc_set(layout);
+    VkDescriptorSet ds = VK_NULL_HANDLE; // T260: allocate only after an exact-value cache miss
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
@@ -4748,7 +4946,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-            bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info() : gmem_info();
+            bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info() : gmem_shader_info();
             w[n].pBufferInfo = &bi[n];
         } else {
             continue;  // rscale / tint: written below, once the textures (and their scales) are known
@@ -4779,7 +4977,32 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n].pBufferInfo = &bi[n];
         n++;
     }
-    if (n) vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    XcdeDescriptorKey keys[MAX_BIND];
+    for (int i=0;i<n;i++) {
+        keys[i]=(XcdeDescriptorKey){{((uint64_t)w[i].dstBinding<<32)|(uint32_t)w[i].descriptorType,0,0,0}};
+        if (w[i].descriptorType==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || w[i].descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+            const VkDescriptorImageInfo *v=w[i].pImageInfo;
+            keys[i].word[1]=(uint64_t)(uintptr_t)v->sampler;
+            keys[i].word[2]=(uint64_t)(uintptr_t)v->imageView; keys[i].word[3]=v->imageLayout;
+        } else {
+            const VkDescriptorBufferInfo *v=w[i].pBufferInfo;
+            keys[i].word[1]=(uint64_t)(uintptr_t)v->buffer; keys[i].word[2]=v->offset; keys[i].word[3]=v->range;
+        }
+    }
+    uint64_t seq=vk_pending_seq(), lid=(uint64_t)(uintptr_t)layout;
+    XcdeDescriptorEntry *entry=&descriptor_cache[xcde_descriptor_slot(lid,keys,(unsigned)n)];
+    const char *override=getenv("XCDE_DESCRIPTOR_CACHE");
+    bool enabled=!override || atoi(override)!=0;
+    if (enabled && xcde_descriptor_match(entry,seq,lid,keys,(unsigned)n)) {
+        metric_desc_hits++; return (VkDescriptorSet)(uintptr_t)entry->handle;
+    }
+    ds=vk_alloc_set(layout);
+    for (int i=0;i<n;i++) w[i].dstSet=ds;
+    if (n) { vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL); metric_desc_updates++; }
+    if (enabled) {
+        entry->sequence=seq; entry->layout=lid; entry->handle=(uint64_t)(uintptr_t)ds; entry->count=(unsigned)n;
+        memcpy(entry->key,keys,(size_t)n*sizeof *keys);
+    }
     return ds;
 }
 
@@ -4900,7 +5123,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
-    if (cp->si->uses_gmem_store) { vc_mark_sbufs(5); if (nwant) xsh_stored(5); }
+    if (cp->si->uses_gmem_store) { vc_mark_sbufs(5); if (nwant) xsh_stored(5); atomic_store(&host_read_pending, true); }
+    gmem_stage_finish(cp->si->uses_gmem_store);
     stat_dispatches++;
 }
 
@@ -4910,7 +5134,16 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 // Quads / fans / polygons as a 32-bit triangle index list.
 static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indices, int itype, uint32_t first, uint32_t *out_count) {
     uint32_t tris = mode == 7 ? count / 4 * 2 : count >= 3 ? count - 2 : 0;
-    uint32_t *out = malloc(tris * 3 * 4 + 4);
+    // T260: render-thread scratch; the caller copies it before the next expansion. Never read back WC GPU memory.
+    static uint32_t *scratch;
+    static size_t capacity;
+    size_t needed = ((size_t)tris * 3 + 1) * sizeof(uint32_t);
+    if (needed > capacity) {
+        uint32_t *next = realloc(scratch, needed);
+        if (!next) FATAL("[vk] cannot expand %u primitive indices\n", count);
+        scratch=next; capacity=needed;
+    }
+    uint32_t *out=scratch;
     uint32_t n = 0;
 #define IDX(i) (indices ? (itype == 0 ? ((const uint8_t *)indices)[i] : itype == 1 ? ((const uint16_t *)indices)[i] : ((const uint32_t *)indices)[i]) : first + (i))
     if (mode == 7) {
@@ -4923,6 +5156,7 @@ static uint32_t *expand_indices(uint32_t mode, uint32_t count, const void *indic
     }
 #undef IDX
     *out_count = n;
+    out[n]=0; // copied padding is initialized too
     return out;
 }
 
@@ -5616,7 +5850,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[3] = {vset, fset, VK_NULL_HANDLE};
     if (pr->gi) sets[2] = stage_set(pr, pr->set_layout[2], 2, 2, pr->gi, NULL, NULL, 0, 0, 0, NULL);  // [XCDE] geometry
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, pr->gi ? 3 : 2, sets, 0, NULL);  // (always new sets)
+    vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, pr->gi ? 3 : 2, sets, 0, NULL);  // (always new sets)
     if (pr->vi->uses_gmem_store) vc_mark_sbufs(0);
     if (pr->fi->uses_gmem_store) vc_mark_sbufs(1);
 
@@ -5636,7 +5870,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (!native) {
             uint32_t *e = expand_indices(mode, count, NULL, 0, first, &icount);
             ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
-            free(e);
+            // T260: expansion scratch is retained by the render thread.
         }
     } else {
         uint32_t itype = (uint32_t)r->x[1];
@@ -5668,7 +5902,7 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t *e = expand_indices(mode, count, src, (int)itype, 0, &icount);
             for (uint32_t i = 0; i < icount; i++) if (e[i] > max_index) max_index = e[i];
             ib = vk_transient_copy(e, (uint64_t)icount * 4 + 4, 4);
-            free(e);
+            // T260: expansion scratch is retained by the render thread.
         }
         if (!scan_src) {
             max_index += 1;
@@ -5776,7 +6010,7 @@ static void draw_(CmdRec *r, bool indexed) {
             extern void pot_gold_tint(float tint[8]);
             if (run_gold[ri]) pot_gold_tint(rtint);
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
-            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
+            vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
         }
         if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
@@ -5800,6 +6034,8 @@ static void draw_(CmdRec *r, bool indexed) {
         vk_end_pass(); st.rt_dirty = true; pass_untracked = !(mem_track_mode() & 1);
         if (nwant) { if (pr->vi->uses_gmem_store) xsh_stored(0); if (pr->fi->uses_gmem_store) xsh_stored(1); }  // (T197)
     }
+    if (xfb_bytes || pr->vi->uses_gmem_store || pr->fi->uses_gmem_store || (pr->gi && pr->gi->uses_gmem_store)) atomic_store(&host_read_pending, true);
+    gmem_stage_finish(xfb_bytes || pr->vi->uses_gmem_store || pr->fi->uses_gmem_store || (pr->gi && pr->gi->uses_gmem_store));
     if (xfb_bytes) { vk_end_pass(); st.rt_dirty = true; xsh_written(st.xfb_buf[0].addr, st.xfb_buf[0].size, xfb_at, xfb_bytes); }  // [XCDE] T175
     if (g_debug_frame && getenv("XCDE_DUMP_VB")) {  // [XCDE] debugging: what each stream holds when the GPU has run this draw
         char code[32]; snprintf(code, sizeof code, "%llx", (unsigned long long)st.program->stages[0].code_addr);
@@ -6394,7 +6630,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
     }
     vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout, 0, 1, &ds, 0, NULL);
+    vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {0, 0, (float)dst->width, (float)dst->height, 0, 1};
     VkRect2D sc = {{0, 0}, {dst->width, dst->height}};
     vkCmdSetViewport(cb, 0, 1, &vp);
@@ -6504,7 +6740,7 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
                                        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &hi};
             vkUpdateDescriptorSets(g_vk.dev, 1, &hw, 0, NULL);
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &hs, 0, NULL);
+            vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &hs, 0, NULL);
             VkViewport hvp = {vx, vy, vw, vh, 0, 1};
             VkRect2D hsc = {{0, 0}, g_vk.sc_extent};
             vkCmdSetViewport(cb, 0, 1, &hvp);
@@ -6522,7 +6758,7 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
+    vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {vx, vy, vw, vh, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
@@ -6543,7 +6779,7 @@ void vk_present_redraw(VkCommandBuffer cb) {
                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
+    vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     vkCmdSetViewport(cb, 0, 1, &rp_vp);
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, rp_pv);
     vkCmdDraw(cb, 3, 1, 0, 0);
@@ -6589,7 +6825,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
                                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
+    vk_bind_graphics_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
     VkRect2D sc = {{0, 0}, {w, h}};
     vkCmdSetViewport(cb, 0, 1, &vp);
@@ -6964,7 +7200,7 @@ static void exec_list(uint64_t handle, int depth) {
 // first waits for the worker to have run the job that set it (tickets; fences inside lists are found when the list is
 // queued). At most 2 presents queued (the game can't run further ahead). Off in deterministic runs and with
 // XCDE_ASYNC_RENDER=0.
-typedef struct { int kind; uint64_t a; } RJob;
+typedef struct { int kind; uint64_t a, result_seq; } RJob;
 enum { RJ_EXEC, RJ_PRESENT, RJ_FENCE, RJ_DESTROY };
 #define RQ_N 4096
 static RJob rq[RQ_N];
@@ -7037,7 +7273,10 @@ static void *rq_worker(void *arg) {
         vk_rq_at(j.kind >= 0 && j.kind < 4 ? kind_name[j.kind] : "a job");
         switch (j.kind) {
         case RJ_EXEC: backend_execute(j.a); break;
-        case RJ_PRESENT: backend_present((NvnTexture *)(uintptr_t)j.a); break;
+        case RJ_PRESENT:
+            backend_present((NvnTexture *)(uintptr_t)j.a);
+            if (j.result_seq) { renderer_submit(); *(uint64_t *)(uintptr_t)j.result_seq = renderer_fence_seq(); }
+            break;
         case RJ_FENCE: { extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq); nvn_sync_set_seq(j.a, renderer_fence_seq()); break; }
         case RJ_DESTROY: {
             NvnTexture *t = (NvnTexture *)(uintptr_t)j.a;
@@ -7078,16 +7317,25 @@ bool backend_async(void) {
 }
 
 static void scan_fences(uint64_t handle, uint64_t ticket, int depth);
-static uint64_t rq_push(int kind, uint64_t a) {
+static uint64_t rq_push_result(int kind, uint64_t a, uint64_t result_seq) {
     pthread_mutex_lock(&rq_lock);
     while (rq_tail - rq_head >= RQ_N || (kind == RJ_PRESENT && rq_presents >= 2)) pthread_cond_wait(&rq_done_cv, &rq_lock);
     if (kind == RJ_EXEC) scan_fences(a, rq_tail + 1, 0);  // (under the lock: its syncs carry this job's ticket before anyone waits)
-    rq[rq_tail % RQ_N] = (RJob){kind, a};
+    rq[rq_tail % RQ_N] = (RJob){kind, a, result_seq};
     uint64_t ticket = ++rq_tail;
     if (kind == RJ_PRESENT) rq_presents++;
     pthread_cond_signal(&rq_cv);
     pthread_mutex_unlock(&rq_lock);
     return ticket;
+}
+
+static uint64_t rq_push(int kind, uint64_t a) { return rq_push_result(kind, a, 0); }
+uint64_t backend_queue_present_fenced(NvnTexture *t, uint64_t *seq) {
+    return rq_push_result(RJ_PRESENT, (uint64_t)(uintptr_t)t, (uint64_t)(uintptr_t)seq);
+}
+
+uint64_t backend_present_fenced_sync(NvnTexture *t) {
+    backend_present(t); renderer_submit(); return renderer_fence_seq();
 }
 
 // [XCDE] T240 (diag/watchdog.c): the worker's state in a stall report - no locks (the stall may be inside one)
@@ -7147,4 +7395,37 @@ void backend_execute(uint64_t handle) {
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
     else renderer_submit();
+}
+
+
+// [XCDE] T260: opt-in buffered per-native-frame evidence; no game content or generated frames.
+void vk_metrics_frame(uint64_t frame, uint64_t now, uint64_t present_ns) {
+    static FILE *file; static bool initialized;
+    static uint64_t last, previous[9];
+    if (!initialized) {
+        initialized=true; const char *path=getenv("XCDE_METRICS");
+        if (!path || !*path) return;
+        file=fopen(path,"w");
+        if (!file) { LOG("[metrics] cannot write %s\n",path); return; }
+        setvbuf(file,NULL,_IOFBF,65536);
+        fprintf(file,"#gpu=%s\n#driver=%u\n#api=%u\n#preset=%d\n#resolution=%d\n#fps=%d\n#upscaler=%d\n#effects_off=%u\n",
+                g_vk.props.deviceName,g_vk.props.driverVersion,g_vk.api_version,g_settings.quality_preset,
+                g_settings.res_mode,g_settings.fps,g_settings.upscaler,g_settings.effects_off);
+        fprintf(file,"#output=%ux%u\n#dynamic=%d:%d\n#aa=%d\n#dof_off=%d\n#game_blur=%d\n#upscale_quality=%d\n#frame_gen=%d\n#cutscenes=%d\n#vsync=%d\n#low_memory=%d\n#ram_mib=%d\n#logical_cpus=%d\n",
+                g_vk.sc_extent.width,g_vk.sc_extent.height,g_settings.dynamic_min_height,g_settings.dynamic_max_height,
+                g_settings.antialias,g_settings.dof_off,g_settings.game_blur,g_settings.upscale_quality,g_settings.frame_gen,
+                g_settings.cutscene_mode,g_settings.vsync,g_settings.gpu_performance,SDL_GetSystemRAM(),SDL_GetNumLogicalCPUCores());
+        fprintf(file,"frame,frame_ms,gpu_ms,exec_ms,wait_ms,present_ms,draws,submits,descriptor_hits,descriptor_updates,upload_mib,gmem_upload_mib,gmem_readback_mib,compile_jobs\n");
+    }
+    if (!file) return;
+    uint64_t values[]={cum_exec,cum_wait,cum_draws,cum_submits,metric_desc_hits,metric_desc_updates,metric_gmem_upload,metric_gmem_readback,hc_upload};
+    fprintf(file,"%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%d\n",
+            (unsigned long long)frame,last ? (now-last)/1e6 : 0,vk_native_gpu_ms(),
+            (values[0]-previous[0])/1e6,(values[1]-previous[1])/1e6,present_ns/1e6,
+            (unsigned long long)(values[2]-previous[2]),(unsigned long long)(values[3]-previous[3]),
+            (unsigned long long)(values[4]-previous[4]),(unsigned long long)(values[5]-previous[5]),
+            (values[8]-previous[8])/1048576.0,(values[6]-previous[6])/1048576.0,(values[7]-previous[7])/1048576.0,
+            atomic_load(&g_jobs_queued)+atomic_load(&g_jobs_busy)+atomic_load(&g_xlat_queued));
+    memcpy(previous,values,sizeof values); last=now;
+    if (frame%30==0 || diag_shot_path(frame+1)) fflush(file);
 }

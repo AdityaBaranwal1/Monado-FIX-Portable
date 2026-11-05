@@ -246,10 +246,14 @@ static InEv *g_replay;
 static size_t g_replay_n;
 static FILE *g_rec;
 static int g_in_init;
+static bool g_input_ms;
+static uint64_t g_input_origin;
+static bool g_input_origin_set;
 
 static void input_open(void) {
     if (g_in_init) return;
     g_in_init = 1;
+    g_input_ms = env_flag("XCDE_INPUT_TIME");
     const char *rp = getenv("XCDE_INPUT_REPLAY"), *wp = getenv("XCDE_INPUT_RECORD");
     if (rp && *rp) {
         FILE *f = fopen(rp, "r");
@@ -258,12 +262,19 @@ static void input_open(void) {
             char line[256];
             size_t cap = 0;
             while (fgets(line, sizeof line, f)) {
+                if (strstr(line, "# xcde input v2-ms")) g_input_ms = true;
                 if (line[0] == '#' || line[0] == '\n') continue;
                 InEv e;
                 unsigned long long fr, b;
                 if (sscanf(line, "%llu %llx %d %d %d %d", &fr, &b, &e.lx, &e.ly, &e.rx, &e.ry) != 6) continue;
                 e.frame = fr, e.buttons = b;
-                if (g_replay_n == cap) g_replay = realloc(g_replay, (cap = cap ? cap * 2 : 256) * sizeof *g_replay);
+                if (g_replay_n && e.frame < g_replay[g_replay_n - 1].frame) FATAL("[diag] unsorted input replay: %s\n", rp);
+                if (g_replay_n == cap) {
+                    size_t next = cap ? cap * 2 : 256;
+                    InEv *events = realloc(g_replay, next * sizeof *events);
+                    if (!events) FATAL("[diag] cannot allocate input replay\n");
+                    g_replay = events; cap = next;
+                }
                 g_replay[g_replay_n++] = e;
             }
             fclose(f);
@@ -272,12 +283,18 @@ static void input_open(void) {
     }
     if (wp && *wp) {
         g_rec = fopen(wp, "w");
-        if (g_rec) fputs("# xcde input v1: <frame> <buttons hex> <lx> <ly> <rx> <ry>\n", g_rec);
+        if (g_rec) fputs(g_input_ms ? "# xcde input v2-ms: <milliseconds> <buttons hex> <lx> <ly> <rx> <ry>\n" :
+            "# xcde input v1: <frame> <buttons hex> <lx> <ly> <rx> <ry>\n", g_rec);
     }
 }
 
 void diag_input(uint64_t frame, uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     input_open();
+    if (g_input_ms) {
+        uint64_t now = kernel_det() ? kernel_vnow(0) : plat_now_ns();
+        if (!g_input_origin_set) { g_input_origin = now; g_input_origin_set = true; }
+        frame = now >= g_input_origin ? (now - g_input_origin) / 1000000ull : 0;
+    }
     if (g_replay_n) {  // the last event at or before this frame (events are sorted by frame)
         size_t lo = 0, hi = g_replay_n;
         while (lo < hi) { size_t m = (lo + hi) / 2; if (g_replay[m].frame <= frame) lo = m + 1; else hi = m; }

@@ -1317,3 +1317,36 @@ unB3s\samples.txt - suspected single translator thread: a translation cache woul
   memory (outside all Win32 heaps; fills while pipelines compile and is not returned when they are destroyed). Lever:
   compile less on low-RAM PCs (prewarm volume, eviction churn: an evicted pipeline compiled again grows it too).
   Measure the AMD / Intel drivers on real hardware before tuning.
+
+
+## Continuación local — 2026-11-04 (sin datos del juego)
+
+Evidencia y límites: `docs/PORT_VALIDATION.md`, `docs/evidence/port_2026-11-04.md`.
+
+- [x] T247 **INI compartido y reemplazo atómico:** conservar claves de otras versiones/frontends; persistir defaults/bindings para permitir restablecerlos. Comprobado con prueba C de round-trip en una compilación anterior; repeticiones posteriores bloqueadas por Windows.
+- [x] T248 **Adaptadores por nombre y UUID:** probe común, capacidades/colas, prioridad env/UUID/índice/auto y fallback informado. Prueba C con driver falso y enumeración real de una AMD integrada. Equipo híbrido real pendiente.
+- [ ] T249 **Tiempo independiente de FPS:** implementados reloj monotónico/virtual, umbrales fraccionarios de seguidores, corrección del limitador de cinemáticas y replay por milisegundos. Falta identificar contadores de menús/combate y verificar velocidades jugables con tolerancia del 1 %.
+- [x] T250 **Despacho Vulkan 1.2 KHR / 1.3 core:** negociación, VMA/ImGui/SPIR-V y gating de SDK opcionales. Smoke de clear/readback pasó por ambas rutas sobre AMD Vulkan 1.3.260. No equivale a soporte certificado de Intel HD ni de drivers solo 1.2.
+- [ ] T251 **Perfil y presupuestos de recursos:** implementados perfil Rendimiento, trabajadores por CPU/RAM, dinámica según FPS y retirada de pipelines bajo presión. Cierre exige benchmarks y soak en hardware representativo.
+- [ ] T252 **Compatibilidad gráfica:** implementados feedback mediante copias, flush/invalidate de memoria no coherente, historia temporal al cambiar resolución y dimensiones estables de readback. Faltan reproducciones jugables de Iris, texturas azules y NVIDIA.
+- [x] T253 **Herramientas y pruebas sin juego:** compilación independiente de 17 módulos y launcher/diagnóstico, pruebas funcionales C y Python, cachés acotadas/identificadas, trazas de shaders y archivos, conversor de rutas. CI Windows añadido; no ejecutado en GitHub desde este árbol sin .git. Bloqueos de ejecución Windows documentados.
+- [ ] T254 **Staging global y límites:** fallback de heap completo con merge de escrituras y retirada segura de importaciones; código compila. Falta validación jugable. Heaps mayores que maxStorageBufferRange siguen necesitando ventanas (T244), con fallo explícito en vez de lecturas cero silenciosas.
+- [ ] T255 **Reutilización por imagen de ventana:** acquire ahora espera el ticket de present y su secuencia GPU, en lugar de devolver éxito inmediatamente. Se añadió prueba C de orden de publicación/espera y límites; compila, pero esa nueva ejecución fue bloqueada por Windows. Cierre exige reproducir >60 FPS en juego y medir que se conserva rendimiento.
+
+
+## T256–T258 — selector Vulkan, DLSS y contador (2026-11-04)
+
+- [x] T256 **Selector de ruta Vulkan según GPU/loader:** Auto/1.2 KHR/1.3/1.4 en launcher y F1; opciones incompatibles deshabilitadas, preferencia persistente y fallback explícito. Política probada con test_display_options; módulos compilan. No se afirma hardware Vulkan 1.4 probado.
+- [x] T257 **Integración DLSS SR y runtime oficial:** SDK NVIDIA-RTX 2.14.16 descargado/verificado por SHA-256; DLL oficiales con Authenticode válido, manifiesto/licencias conservados. Modo Auto, chequeo sobre GPU seleccionada y slIsFeatureSupported; índices de cola 0 cuando no hay extras, hook Win32 surface, recursos volátiles, estado GPU e historial corregidos. Código y prueba de firma compilan. La ejecución de esa nueva prueba C++ fue bloqueada por Windows; PowerShell sí verificó las firmas. Validación visual de DLSS en RTX y juego completo pendiente por hardware/datos ausentes.
+- [x] T258 **FPS integrado:** HUD activable independiente de F1 y del título, FPS nativos + ms, sin contar repeats/FG y excluido de replays deterministas. Medidor probado a 30/60/120/144/165 FPS; módulo/launcher compilan. Comprobación visual dentro del juego pendiente.
+
+Ver `docs/VULKAN_DLSS_FPS.md` para opciones, fuente oficial, hashes, resultado de pruebas y limitaciones de validación.
+
+
+## Rendimiento e interfaz — 2026-11-04 (T259–T261)
+
+- T259: implementados perfiles compartidos Equilibrado/Rendimiento/Patata/Personalizado, FPS independiente, límites absolutos de resolución, persistencia compatible y recortes experimentales opcionales. Aceptación: round-trip, restauración sin modificar FPS/GPU/guardados, escalado real probado; recortes decorativos pendientes de aceptación visual por escena.
+- T260: implementadas reutilización de descriptores/índices, índice de texturas, caché asociativa de archivos, propiedades GPU cacheadas, resolución dinámica con tiempo GPU, presentación con presupuesto y métricas/benchmark. Aceptación: pruebas nativas de identidad/vida útil/concurrencia, compilación completa, comparación visual y A/B local; rendimiento en campo/combate, Intel/NVIDIA y soak pendientes.
+- T261: implementados tema grafito/verde, bordes redondeados, navegación lateral, controles compartidos/responsivos y reducción de trabajo de UI. Aceptación: launcher enlazado y capturas nativas a 720p/1080p y 200 % DPI; navegación manual con mando y F1 en escenas jugables pendientes.
+
+Detalle: `docs/PERFORMANCE_UI.md`. Evidencia: `docs/evidence/performance_ui_2026-11-04.md`. No marcar compatibilidad de una familia a partir de una sola GPU.

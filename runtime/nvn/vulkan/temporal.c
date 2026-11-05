@@ -66,6 +66,8 @@ static bool ffx_load(void) {
 static int env_int(const char *k) { const char *e = getenv(k); return e ? atoi(e) : 0; }
 
 bool tmp_enabled(void) {
+    // T250: vendor temporal SDKs use additional 1.3 features. The legacy backend uses spatial scaling.
+    if (g_vk.api_version < VK_API_VERSION_1_3) return false;
     static int on = -1, for_upscaler = -1;
     if (for_upscaler != g_settings.upscaler) { on = -1; for_upscaler = g_settings.upscaler; }  // (changed in the F1 menu)
     if (on < 0) {
@@ -500,6 +502,9 @@ static void mv_shot(VkCommandBuffer cb, uint32_t rw, uint32_t rh, const double r
 VkImageView tmp_upscale(VkCommandBuffer cb, TexBackend *color, VkImageView color_view, TexBackend *depth, const TmpCamera *cam,
                         const float jitter[2], bool dm1, uint32_t ow, uint32_t oh) {
     static TmpCamera prev;
+    static uint32_t prev_rw, prev_rh, prev_ow, prev_oh;
+    static int prev_upscaler = -1;
+    static int prev_quality = -1;
     static uint64_t frames, t_last;
     static float last_jit[2];
     if (!cam || !cam->ok || !depth || !(depth->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || !color) { prev.ok = false; tmp_fg_idle(cb); return VK_NULL_HANDLE; }
@@ -507,6 +512,11 @@ VkImageView tmp_upscale(VkCommandBuffer cb, TexBackend *color, VkImageView color
     if (!rw || !rh || !ow || !oh || ow > 16384 || oh > 16384 || rw > ow + 1 || rh > oh + 1) { prev.ok = false; tmp_fg_idle(cb); return VK_NULL_HANDLE; }
     jit_phases = (uint32_t)ceil(8.0 * ((double)ow / rw) * ((double)oh / rh));
     if (jit_phases < 8) jit_phases = 8;
+    // T252: resized scene/output and upscaler changes invalidate history before reprojection.
+    bool size_changed = rw != prev_rw || rh != prev_rh || ow != prev_ow || oh != prev_oh || prev_upscaler != g_settings.upscaler || prev_quality != g_settings.upscale_quality;
+    if (size_changed) { prev.ok = false; last_jit[0] = last_jit[1] = 0; }
+    prev_rw = rw; prev_rh = rh; prev_ow = ow; prev_oh = oh; prev_upscaler = g_settings.upscaler;
+    prev_quality = g_settings.upscale_quality;
     // previous view-projection x inverse(current): this frame's NDC -> the previous frame's clip position
     double cur[16], pv[16], inv[16], reproj[16];
     mat_from_rows(cam->viewproj, cur);
@@ -602,5 +612,6 @@ VkImageView tmp_upscale(VkCommandBuffer cb, TexBackend *color, VkImageView color
             cam->proj[5]);
     last_jit[0] = jitter[0]; last_jit[1] = jitter[1];
     prev = *cam;
+    if (!ok) prev.ok = false;
     return ok ? img[3].v : VK_NULL_HANDLE;
 }

@@ -267,6 +267,10 @@ def main():
         shutil.copy2(e, os.path.join(out, 'build', os.path.basename(e)))
     for d in build_dlls:  # DLSS / FSR / Reflex / SDL...: loaded by name at run time
         shutil.copy2(d, os.path.join(out, 'build', os.path.basename(d)))
+    if os.path.isdir(os.path.join('build', 'dlss-licenses')):
+        copy_tree(os.path.join('build', 'dlss-licenses'), os.path.join(out, 'build', 'dlss-licenses'), 'NVIDIA runtime licences/')
+    if os.path.isfile(os.path.join('build', 'dlss-runtime.json')):
+        shutil.copy2(os.path.join('build', 'dlss-runtime.json'), os.path.join(out, 'build', 'dlss-runtime.json'))
     for low, p in sorted(found.items()):
         dst = os.path.join(out, 'build', os.path.basename(p))
         if not os.path.exists(dst):

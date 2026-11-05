@@ -1,6 +1,9 @@
 // User settings (larecomp.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
 #include <stdbool.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
@@ -37,6 +40,9 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    bool fps_overlay;     // T258: on-screen native-FPS / frame-time display
+    bool upscaler_auto;   // T257: DLSS SR when the SDK confirms support, otherwise FSR 1
+    int vulkan_api;       // T256: 0 automatic, 12/13/14 requested backend route (restart)
     int fps;  // [XCDE] frame rate target: 30 (the game's own), 60, 120, 144..., 0 = unlimited (runtime/hle/framepace.c)
     bool dpad_move;      // the d-pad (and arrow keys) move Link like the stick
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
@@ -73,6 +79,12 @@ typedef struct {
     int stick_deadzone;  // [XCDE] % of the stick's travel read as centred (xcde.ini stick_deadzone = 0-30, default 0: raw)
     int cutscene_mode;   // [XCDE] T224: 0 cutscenes at the FPS setting, 1 at 30, 2 at 30 + FSR 3 frame generation (xcde.ini cutscenes = same|30|30fg)
     int gpu_index;       // Vulkan enumerated physical-device index; -1 = automatic (restart required)
+    char gpu_uuid[33];   // [XCDE] T248: stable device UUID, empty = automatic/legacy index
+    bool gpu_performance; // [XCDE] T251: opt-in lightweight preset
+    int quality_preset;   // T259: balanced/performance/potato/custom, applied explicitly by either UI
+    int dynamic_min_height, dynamic_max_height; // 0: legacy window-relative limits; otherwise absolute pixel heights
+    unsigned effects_off; // T259: opt-in cosmetic switches, original game files are never changed
+    bool gpu_keep_heavy; // restore the three expensive AMD volume-effect shaders (restart)
     int gpu_profile;     // GPU_PROFILE_*; compatibility disables optional pipeline-library, host-import and frame-generation paths
     int gpu_gpl;         // GPU_GPL_*; explicit graphics-pipeline-library override, restart required
     bool gpu_memory_budget; // use VK_EXT_memory_budget when exposed; informational allocator support
@@ -91,3 +103,6 @@ void settings_save(void);
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")
 const char *settings_language_name(void);
+#ifdef __cplusplus
+}
+#endif

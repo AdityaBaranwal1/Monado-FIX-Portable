@@ -800,11 +800,13 @@ NVN(nvnWindowBuilderGetNumActiveTextures) { RET(G(uint32_t, A(0), 0x24)); }
 
 NVN(nvnWindowInitialize) {
     NvnWindow *w = calloc(1, sizeof *w);
-    w->num = (int)G(uint32_t, A(1), 0x10);
-    if (w->num > 8) w->num = 8;
+    if (!w) FATAL("[nvn] cannot allocate window\n");
+    uint32_t count = G(uint32_t, A(1), 0x10);
+    if (!count || !G(uint64_t, A(1), 0x18)) { free(w); RET(0); return; }
+    w->num = count > 8 ? 8 : (int)count;
     memcpy(w->textures, (void *)(uintptr_t)G(uint64_t, A(1), 0x18), w->num * 8);
     w->interval = (int)G(uint32_t, A(1), 0x20);
-    w->active = G(uint32_t, A(1), 0x24) ? (int)G(uint32_t, A(1), 0x24) : w->num;
+    w->active = xcde_window_active(G(uint32_t, A(1), 0x24), w->num);
     SET_HOST(A(0), w);
     LOG("[nvn] window with %d textures\n", w->num);
     {   // [XCDE] T146: the render scale is relative to the size the game presents (its window textures)
@@ -820,7 +822,7 @@ NVN(nvnWindowSetDebugLabel) { (void)c; }
 NVN(nvnWindowGetNativeWindow) { RET(0); }
 NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
 NVN(nvnWindowGetNumActiveTextures) { RET(WIN->active); }
-NVN(nvnWindowSetNumActiveTextures) { WIN->active = (int)A(1); }
+NVN(nvnWindowSetNumActiveTextures) { WIN->active = xcde_window_active((uint32_t)A(1), WIN->num); if (WIN->next >= WIN->active) WIN->next = 0; }
 NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 NVN(nvnWindowSetPresentInterval) {
     WIN->interval = (int)A(1);
@@ -829,8 +831,20 @@ NVN(nvnWindowSetPresentInterval) {
 }
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
+// [XCDE] T255: the old implementation rotated indices and signalled success immediately,
+// allowing a fast CPU (especially >60 FPS) to overwrite an image still read by the GPU.
+static void window_acquire_ready(NvnWindow *w) {
+#ifdef _WIN32
+    extern void backend_wait_ticket(uint64_t ticket);
+    extern void renderer_wait_seq(uint64_t seq);
+    xcde_window_reuse_wait(&w->reuse[w->next], backend_wait_ticket, renderer_wait_seq);
+#else
+    (void)w;
+#endif
+}
 NVN(nvnWindowAcquireTexture) {
     NvnWindow *w = WIN;
+    window_acquire_ready(w);
     if (A(1)) sync_of(A(1))->signaled = 1;
     *(int32_t *)AP(2) = w->next;
     w->next = (w->next + 1) % (w->active ? w->active : 1);
@@ -838,6 +852,7 @@ NVN(nvnWindowAcquireTexture) {
 }
 NVN(nvnQueueAcquireTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
+    window_acquire_ready(w);
     *(int32_t *)AP(2) = w->next;
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
@@ -846,7 +861,16 @@ NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
     extern void backend_queue_present(NvnTexture *t);
-    if (i >= 0 && i < w->num) { if (backend_async()) backend_queue_present(HOST(NvnTexture, w->textures[i])); else backend_present(HOST(NvnTexture, w->textures[i])); }
+    if (i >= 0 && i < w->num) {
+#ifdef _WIN32
+        extern uint64_t backend_queue_present_fenced(NvnTexture *t, uint64_t *seq);
+        extern uint64_t backend_present_fenced_sync(NvnTexture *t);
+        if (backend_async()) w->reuse[i].ticket = backend_queue_present_fenced(HOST(NvnTexture, w->textures[i]), &w->reuse[i].seq);
+        else w->reuse[i].seq = backend_present_fenced_sync(HOST(NvnTexture, w->textures[i]));
+#else
+        if (backend_async()) backend_queue_present(HOST(NvnTexture, w->textures[i])); else backend_present(HOST(NvnTexture, w->textures[i]));
+#endif
+    }
     if (getenv("XCDE_LOG_PACE")) {  // [XCDE] vsyncs between presents (the game's real frame interval)
         extern volatile uint64_t g_vsync_count;
         static uint64_t last, n;

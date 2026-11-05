@@ -1,3 +1,6 @@
+#include <SDL3/SDL.h>
+#include "../../settings.h"
+#include "../../resource_policy.h"
 // [XCDE] T187: shader precompilation from the game's own shader containers (RomFS), before the first play.
 //
 // `xcde.exe --precompile <dump dir>` (the launcher's "Precompilar shaders" button; JUGAR runs it the first time) walks
@@ -598,6 +601,8 @@ int vk_precompile_main(const char *root) {
     inflight_open();  // [XCDE] T240 crash-safe
     int nthreads = plat_cpu_count() - 1;
     if (getenv("XCDE_PRECOMPILE_THREADS")) nthreads = atoi(getenv("XCDE_PRECOMPILE_THREADS"));
+    else nthreads = xcde_shader_workers(plat_cpu_count(), SDL_GetSystemRAM(),
+        g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, g_settings.gpu_performance);
     {   // [XCDE] T240 (idea from SavageWindRecomp 66b110a): the driver compiles take memory per thread - measured here
         // ~1.1 GB peak for 15 threads on NVIDIA, but other drivers' largest shaders take far more: at most one thread
         // per 400 MB of a quarter of the RAM (8 GB: 5 threads; the min-spec 4-core CPU has 3 anyway)

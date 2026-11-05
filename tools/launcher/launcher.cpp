@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
 
 #include <string>
 #include <sys/stat.h>
@@ -16,6 +18,11 @@
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
+#include "../../runtime/host/ini_writer.h"
+#include "../../runtime/nvn/vulkan/gpu_scan.h"
+#include "../../runtime/ui/gpu_picker.h"
+#include "../../runtime/ui/theme.h"
+#include "../../runtime/ui/quality_controls.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -77,6 +84,14 @@ static int key_from_ini(const char *v) {
 }
 
 struct Cfg {
+    char gpu_uuid[33] = "";
+    int vulkan_api = 0;
+    bool fps_overlay = true, upscaler_auto = true;
+    int gpu_index = -1;
+    int quality_preset=0, dynamic_min_height=0, dynamic_max_height=0;
+    unsigned effects_off=0;
+    int gpu_profile = 0, gpu_gpl = -1;
+    bool gpu_memory_budget = true, gpu_performance = false, gpu_keep_heavy = false;
     bool fullscreen = false;
     int win = 0;            // index into k_wins
     int res = 0;            // index into k_res
@@ -128,7 +143,7 @@ static const char *const k_wins[] = {"1280x720", "1600x900", "1920x1080", "2560x
 static const char *const k_res_ini[] = {"match", "1", "2", "3", "75%", "50%", "dynamic"};
 static const char *const k_res_ui[] = {"Igual que la ventana (recomendado)", "1x - 720p (como Switch)", "2x - 1440p",
                                        "3x - 2160p (4K)", "75% de la ventana", "50% de la ventana", "Dinámica (según rendimiento)"};
-static const char *const k_fps_ini[] = {"30", "60", "120", "144", "165", "unlimited"};
+static const char *const k_fps_ini[] = {"30", "60", "120", "144", "165", "unlímited"};
 static const char *const k_lang_ini[] = {"auto", "en-US", "es", "fr", "de", "it", "ja"};
 static const char *const k_lang_ui[] = {"Inglés (por defecto)", "Inglés", "Español", "Francés", "Alemán", "Italiano", "Japonés"};
 
@@ -213,7 +228,7 @@ static const char *const k_en[][2] = {
      "Switch's 720p: at 1080p or more they soften the whole image.\n"
      "Off: a sharp image (combine it with SMAA for the edges)."},
     {"Mostrar FPS en la barra de título", "Show FPS in the title bar"}, {"Velocidad", "Speed"},
-    {"30 (como en Switch)", "30 (like Switch)"}, {"Sin límite", "Unlimited"},
+    {"30 (como en Switch)", "30 (like Switch)"}, {"Sin límite", "Unlímited"},
     {"Más de 30: la velocidad del mundo, el reloj y las escenas no cambian (probado a 60 y 120);\n"
      "la cámara queda un poco más lejos. El V-Sync forzado en el panel de NVIDIA / AMD o el límite\n"
      "de RivaTuner también limitan los FPS: déjalos en 'configuración de la aplicación' / 0.",
@@ -224,7 +239,7 @@ static const char *const k_en[][2] = {
     {"Cada imagen se muestra exactamente una vez, sincronizada con la pantalla: movimiento\n"
      "fluido (sin imágenes repetidas o saltadas). Con más de 60 FPS o sin límite no se aplica.",
      "Each image is shown exactly once, in sync with the display: smooth motion\n"
-     "(no repeated or skipped images). Not applied above 60 FPS or unlimited."},
+     "(no repeated or skipped images). Not applied above 60 FPS or unlímited."},
     {"Como el resto del juego", "Like the rest of the game"}, {"30 estables (como en Switch)", "Steady 30 (like Switch)"},
     {"Cinemáticas", "Cutscenes"},
     {"En las cinemáticas el juego anima a los personajes a 30 aunque juegues a más FPS: con la\n"
@@ -354,7 +369,7 @@ static void load() {
         if (!eq || line[0] == '#') continue;
         *eq = 0;
         char *k = line, *v = eq + 1;
-        if (!memcmp(k, "\xEF\xBB\xBF", 3)) k += 3;  // (a UTF-8 BOM: the file was saved from Notepad)
+        if (strlen(k) >= 3 && !memcmp(k, "\xEF\xBB\xBF", 3)) k += 3;  // (a UTF-8 BOM: the file was saved from Notepad)
         while (*k == ' ' || *k == '\t') k++;
         for (char *e = k + strlen(k); e > k && (e[-1] == ' ' || e[-1] == '\t'); ) *--e = 0;
         while (*v == ' ' || *v == '\t') v++;
@@ -363,7 +378,7 @@ static void load() {
         if (!strcmp(k, "fullscreen")) g.fullscreen = atoi(v) != 0;
         else if (!strcmp(k, "window") && (i = find(k_wins, 5, v)) >= 0) g.win = i;
         else if (!strcmp(k, "resolution") && (i = find(k_res_ini, 7, v)) >= 0) g.res = i;
-        else if (!strcmp(k, "upscaler")) g.upscaler = !strcmp(v, "fsr") ? 1 : !strcmp(v, "fsr3") ? 2 : !strcmp(v, "dlss") ? 3 : 0;
+        else if (!strcmp(k, "upscaler")) { g.upscaler_auto = !strcmp(v, "auto"); g.upscaler = !strcmp(v, "fsr") || g.upscaler_auto ? 1 : !strcmp(v, "fsr3") ? 2 : !strcmp(v, "dlss") ? 3 : 0; }
         else if (!strcmp(k, "upscale_quality") && (i = find(k_uq_ini, 5, v)) >= 0) g.uquality = i;
         else if (!strcmp(k, "frame_gen")) g.frame_gen = atoi(v) != 0;
         else if (!strcmp(k, "antialias")) g.smaa = !strcmp(v, "smaa");
@@ -373,6 +388,19 @@ static void load() {
         else if (!strcmp(k, "cutscenes")) { g.cutscenes = !strcmp(v, "30") || !strcmp(v, "30fg") ? 1 : 0; g.cut_fg = !strcmp(v, "30fg"); }
         else if (!strcmp(k, "party_switch")) g.party_switch = atoi(v) != 0;
         else if (!strcmp(k, "show_fps")) g.show_fps = atoi(v) != 0;
+        else if (!strcmp(k, "vulkan_api")) g.vulkan_api = !strcmp(v, "1.2") ? 12 : !strcmp(v, "1.3") ? 13 : !strcmp(v, "1.4") ? 14 : 0;
+        else if (!strcmp(k, "fps_overlay")) g.fps_overlay = atoi(v) != 0;
+        else if (!strcmp(k, "gpu_uuid")) snprintf(g.gpu_uuid, sizeof g.gpu_uuid, "%s", v);
+        else if (!strcmp(k, "gpu_index")) g.gpu_index = std::clamp(atoi(v), -1, 255);
+        else if (!strcmp(k, "gpu_profile")) g.gpu_profile = !strcmp(v, "compatibility");
+        else if (!strcmp(k, "gpu_gpl")) g.gpu_gpl = !strcmp(v, "on") ? 1 : !strcmp(v, "off") ? 0 : -1;
+        else if (!strcmp(k, "gpu_memory_budget")) g.gpu_memory_budget = atoi(v) != 0;
+        else if (!strcmp(k, "gpu_preset")) { g.quality_preset=xcde_quality_parse(v); g.gpu_performance=g.quality_preset==QUALITY_PERFORMANCE || g.quality_preset==QUALITY_POTATO; }
+        else if (!strcmp(k, "low_memory")) g.gpu_performance=atoi(v)!=0;
+        else if (!strcmp(k, "dynamic_min_height")) g.dynamic_min_height=std::clamp(atoi(v),0,4320);
+        else if (!strcmp(k, "dynamic_max_height")) g.dynamic_max_height=std::clamp(atoi(v),0,4320);
+        else if (!strcmp(k, "effects_off")) g.effects_off=(unsigned)strtoul(v,nullptr,10)&31u;
+        else if (!strcmp(k, "gpu_keep_heavy")) g.gpu_keep_heavy = atoi(v) != 0;
         else if (!strcmp(k, "fps")) { g.fps = 0; for (int j = 0; j < 6; j++) if (!strcmp(v, k_fps_ini[j])) g.fps = j; }
         else if (!strcmp(k, "volume")) g.volume = atoi(v);
         else if (!strcmp(k, "movie_audio")) g.movie_audio = atoi(v) != 0;
@@ -398,11 +426,18 @@ static void load() {
 }
 
 static bool save() {
-    FILE *f = fopen(path("xcde.ini").c_str(), "w");
+    std::string settings_path = path("xcde.ini");
+    char tmp[1200];
+    FILE *f = xcde_ini_begin(settings_path.c_str(), tmp, sizeof tmp);
     if (!f) return false;
     fprintf(f, "# Monado settings (written by the launcher)\n");
+    fprintf(f, "gpu_uuid = %s\ngpu_index = %d\ngpu_profile = %s\ngpu_gpl = %s\ngpu_memory_budget = %d\ngpu_preset = %s\ngpu_keep_heavy = %d\n",
+        g.gpu_uuid, g.gpu_index, g.gpu_profile ? "compatibility" : "auto", g.gpu_gpl < 0 ? "auto" : g.gpu_gpl ? "on" : "off",
+        g.gpu_memory_budget, xcde_quality_name(g.quality_preset), g.gpu_keep_heavy);
+    fprintf(f,"low_memory = %d\ndynamic_min_height = %d\ndynamic_max_height = %d\neffects_off = %u\n",g.gpu_performance,g.dynamic_min_height,g.dynamic_max_height,g.effects_off);
     fprintf(f, "fullscreen = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n", g.fullscreen,
-            k_wins[g.win], k_res_ini[g.res], k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
+            k_wins[g.win], k_res_ini[g.res], g.upscaler_auto ? "auto" : k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
+    fprintf(f, "vulkan_api = %s\nfps_overlay = %d\n", g.vulkan_api == 12 ? "1.2" : g.vulkan_api == 13 ? "1.3" : g.vulkan_api == 14 ? "1.4" : "auto", g.fps_overlay);
     fprintf(f, "upscale_quality = %s\nframe_gen = %d\n", k_uq_ini[g.uquality], g.frame_gen);
     fprintf(f, "depth_of_field = %d\n", g.dof);
     fprintf(f, "game_blur = %d\n", g.game_blur);
@@ -423,8 +458,7 @@ static bool save() {
     fprintf(f, "mouse_look = %d\nmouse_sens = %d\nmouse_invert = %d\n", g.mouse_look, g.mouse_sens, g.mouse_invert);
     fprintf(f, "stick_deadzone = %d\n", g.stick_deadzone);
     fprintf(f, "launcher_lang = %s\n", g.ui_lang ? "en" : "es");
-    fclose(f);
-    return true;
+    return xcde_ini_commit(f, tmp, settings_path.c_str()) != 0;
 }
 
 static bool exists(const char *rel) {
@@ -433,6 +467,7 @@ static bool exists(const char *rel) {
 }
 
 static std::string g_status;
+static bool g_mod_dirty;
 static bool g_launched_ok;  // (launch() started the game: the launcher closes)
 static float g_scale = 1;
 
@@ -647,29 +682,139 @@ static bool capture_event(const SDL_Event &e) {
 }
 
 // ------------------------------------------------------------------ UI
+
+// [XCDE] T259: adapt the legacy launcher model at one boundary; policy lives in quality_policy.h.
+static Settings quality_settings() {
+    Settings v{};
+    static const int resolutions[]={RES_MATCH,1,2,3,RES_Q75,RES_Q50,RES_DYNAMIC};
+    static const int upscalers[]={UPSCALE_BILINEAR,UPSCALE_FSR1,UPSCALE_FSR3,UPSCALE_DLSS};
+    static const int fps[]={30,60,120,144,165,0};
+    v.quality_preset=g.quality_preset; v.gpu_performance=g.gpu_performance;
+    v.res_mode=resolutions[std::clamp(g.res,0,6)]; v.upscaler=upscalers[std::clamp(g.upscaler,0,3)];
+    v.upscaler_auto=g.upscaler_auto; v.antialias=g.smaa ? AA_SMAA : AA_OFF;
+    v.upscale_quality=g.uquality;
+    v.dof_off=!g.dof; v.game_blur=g.game_blur; v.frame_gen=g.frame_gen;
+    v.dynamic_min_height=g.dynamic_min_height; v.dynamic_max_height=g.dynamic_max_height;
+    v.effects_off=g.effects_off; v.fps=fps[std::clamp(g.fps,0,5)];
+    v.cutscene_mode=g.cut_fg ? 2 : g.cutscenes ? 1 : 0; return v;
+}
+static void quality_from_settings(const Settings &v) {
+    static const int resolutions[]={RES_MATCH,1,2,3,RES_Q75,RES_Q50,RES_DYNAMIC};
+    static const int upscalers[]={UPSCALE_BILINEAR,UPSCALE_FSR1,UPSCALE_FSR3,UPSCALE_DLSS};
+    static const int fps[]={30,60,120,144,165,0};
+    for (int i=0;i<7;i++) if (resolutions[i]==v.res_mode) g.res=i;
+    for (int i=0;i<4;i++) if (upscalers[i]==v.upscaler) g.upscaler=i;
+    for (int i=0;i<6;i++) if (fps[i]==v.fps) g.fps=i;
+    g.quality_preset=v.quality_preset; g.gpu_performance=v.gpu_performance;
+    g.upscaler_auto=v.upscaler_auto; g.smaa=v.antialias==AA_SMAA;
+    g.uquality=v.upscale_quality;
+    g.dof=!v.dof_off; g.game_blur=v.game_blur; g.frame_gen=v.frame_gen;
+    g.dynamic_min_height=v.dynamic_min_height; g.dynamic_max_height=v.dynamic_max_height; g.effects_off=v.effects_off;
+    g.cut_fg=v.cutscene_mode==2; g.cutscenes=v.cutscene_mode ? 1 : 0;
+}
+static XcdeGpu *adapters;
+static uint32_t adapter_count;
+static bool probed;
+static char gpu_error[512];
+static void ensure_adapters() { if (!probed) { adapters=xcde_gpu_scan(&adapter_count,gpu_error,sizeof gpu_error); probed=true; } }
+static void tab_home() {
+    ensure_adapters();
+    ImGui::SeparatorText(g.ui_lang ? "Ready to play" : "Preparar partida");
+    const XcdeGpuInfo *gpu=xcde_gpu_preference(adapters,adapter_count,g.gpu_uuid,g.gpu_index);
+    ImGui::TextDisabled("%s",g.ui_lang ? "Selected graphics adapter" : "Adaptador gráfico seleccionado");
+    ImGui::TextWrapped("%s",gpu ? gpu->name : (g.ui_lang ? "No compatible adapter detected" : "Sin adaptador compatible detectado"));
+    if (*gpu_error) ImGui::TextWrapped("%s",gpu_error);
+    ImGui::Spacing();
+    Settings v=quality_settings(); monado_quality_controls(&v,g.ui_lang!=0); quality_from_settings(v);
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s",g.ui_lang ? "For modest hardware, start with Potato and a 30 FPS target. Quality and frame rate are independent." :
+        "En equipos modestos, empieza con Patata y un objetivo de 30 FPS. La calidad y los FPS se eligen por separado.");
+    ImGui::SeparatorText(g.ui_lang ? "Shader preparation" : "Preparación de shaders");
+    ImGui::BeginDisabled(pc_running() || !exists("build/xcde.exe"));
+    if (ImGui::Button(T("Precompilar shaders"))) pc_start(false);
+    ImGui::EndDisabled();
+    static uint64_t checked; static bool prepared;
+    if (!checked || SDL_GetTicks()-checked>500) { prepared=pc_done(); checked=SDL_GetTicks(); }
+    ImGui::TextWrapped("%s",prepared ? (g.ui_lang ? "Prepared for this executable. New areas can still need additional variants." :
+        "Preparados para este ejecutable. Algunas zonas aún pueden necesitar variantes adicionales.") :
+        (g.ui_lang ? "Play prepares the shader cache first. Progress can be resumed." : "Jugar prepara primero la cache de shaders. El progreso se puede retomar."));
+}
+static void make_report();
+static void tab_diagnostics() {
+    if (ImGui::Button(T("Crear reporte"))) make_report();
+    ImGui::TextWrapped("%s",g.ui_lang ? "Includes configuration and logs; excludes saves and game files." : "Incluye configuración y registros; excluye partidas y archivos del juego.");
+    ensure_adapters();
+    ImGui::SeparatorText(g.ui_lang ? "Adapter diagnostics" : "Diagnóstico del adaptador");
+    for (uint32_t i=0;i<adapter_count;i++) {
+        const XcdeGpuInfo &v=adapters[i].info;
+        ImGui::TextWrapped("%s",v.name); ImGui::TextWrapped("%s",v.reason);
+        ImGui::Text("Vulkan %u.%u | driver %u | max buffer %u MiB",VK_API_VERSION_MAJOR(v.api),VK_API_VERSION_MINOR(v.api),v.driver,v.max_storage_range>>20);
+        ImGui::Separator();
+    }
+    ImGui::TextWrapped("%s",g.ui_lang ? "Gameplay compatibility is verified per GPU and driver. Capability detection alone is not certification." :
+        "La compatibilidad jugable se comprueba por GPU y controlador. Detectar capacidades no certifica el juego.");
+    ImGui::TextWrapped("%s",g.ui_lang ? "Frame metrics: start using Play Monado (performance metrics).bat. Reports distinguish native FPS, GPU work and waits." :
+        "Metricas: inicia con Play Monado (performance metrics).bat. El informe distingue FPS nativos, trabajo GPU y esperas.");
+}
+
 static void tab_graphics() {
+    Settings initial=quality_settings();
+    Settings editable=initial; monado_quality_controls(&editable,g.ui_lang!=0); quality_from_settings(editable);
+    XcdeQuality before=xcde_quality_current(&editable); int preset_before=g.quality_preset;
+
+    ensure_adapters();
+    const XcdeGpuInfo *selected_gpu=xcde_gpu_preference(adapters,adapter_count,g.gpu_uuid,g.gpu_index);
+    static uint32_t loader_api=xcde_vk_loader_version();
+    bool route_fallback;
+    int route=selected_gpu ? xcde_vulkan_route(selected_gpu->vulkan_routes,10+(int)VK_API_VERSION_MINOR(loader_api),g.vulkan_api,&route_fallback) : 0;
+    bool dlss_files=exists("build/sl.interposer.dll") && exists("build/sl.common.dll") && exists("build/sl.dlss.dll") && exists("build/nvngx_dlss.dll");
+    bool dlss_candidate=selected_gpu && selected_gpu->vendor==0x10de && route>=13 && dlss_files;
+    if (ImGui::CollapsingHeader(g.ui_lang ? "Advanced GPU / Vulkan (restart)" : "GPU / Vulkan avanzado (reiniciar)")) {
+    ImGui::SeparatorText("GPU / Vulkan");
+    xcde_gpu_picker(g.ui_lang ? "Graphics adapter" : "Adaptador gráfico", g.gpu_uuid, sizeof g.gpu_uuid,
+                    &g.gpu_index, adapters, adapter_count, g.ui_lang != 0);
+    xcde_vulkan_picker(selected_gpu, loader_api, &g.vulkan_api, g.ui_lang != 0);
+    if (*gpu_error) ImGui::TextWrapped("%s", gpu_error);
+    if (ImGui::Button(g.ui_lang ? "Refresh adapters" : "Actualizar adaptadores")) { free(adapters); adapters = nullptr; probed = false; }
+    ImGui::Checkbox(g.ui_lang ? "Restore heavy AMD volume effects" : "Restaurar efectos volumétricos pesados AMD", &g.gpu_keep_heavy);
+    ImGui::TextDisabled(g.ui_lang ? "GPU changes apply on next launch." : "Los cambios GPU se aplican al iniciar el juego.");
+    }
     ImGui::SeparatorText(T("Pantalla"));
     ImGui::Checkbox(T("Pantalla completa"), &g.fullscreen);
     ImGui::SetNextItemWidth(260 * g_scale);
-    ImGui::Combo(T("Tamaño de la ventana"), &g.win, k_wins, 5);
+    monado_combo(T("Tamaño de la ventana"), &g.win, k_wins, 5);
     ImGui::SeparatorText(T("Resolución y escalado"));
     ImGui::SetNextItemWidth(360 * g_scale);
-    ImGui::Combo(T("Resolución interna"), &g.res, TL(k_res_ui, 7).p, 7);
+    monado_combo(T("Resolución interna"), &g.res, TL(k_res_ui, 7).p, 7);
     ImGui::TextDisabled(T("El juego original renderiza a 720p. Más resolución = imagen más nítida y más carga para la GPU."));
     const char *ups[] = {"Bilineal (suave)", "AMD FSR 1.0 (nítido)", "AMD FSR 3.1 (temporal, cualquier GPU)",
                          "NVIDIA DLSS (temporal, GPU RTX)"};
     ImGui::SetNextItemWidth(320 * g_scale);
-    ImGui::Combo(T("Escalado / antialiasing"), &g.upscaler, TL(ups, 4).p, 4);
+    const char *up_preview = g.upscaler_auto ? (g.ui_lang ? "Automatic (DLSS on supported RTX)" : "Automático (DLSS en RTX compatible)") : T(ups[g.upscaler]);
+    if (monado_begin_combo(T("Escalado / antialiasing"), up_preview)) {
+        if (ImGui::Selectable(g.ui_lang ? "Automatic (recommended)" : "Automático (recomendado)", g.upscaler_auto)) g.upscaler_auto = true;
+        for (int i = 0; i < 4; ++i) {
+            ImGui::BeginDisabled(i == 3 && !dlss_candidate);
+            if (ImGui::Selectable(T(ups[i]), !g.upscaler_auto && g.upscaler == i)) { g.upscaler_auto = false; g.upscaler = i; }
+            ImGui::EndDisabled();
+            if (i == 3 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", g.ui_lang ? "Requires NVIDIA RTX, Vulkan 1.3+ and official DLLs. SDK confirms support at launch." :
+                    "Requiere NVIDIA RTX, Vulkan 1.3+ y DLL oficiales. El SDK confirma compatibilidad al iniciar.");
+        }
+        ImGui::EndCombo();
+    }
+    if (!dlss_files) ImGui::TextDisabled(g.ui_lang ? "DLSS: official NVIDIA runtime not installed." : "DLSS: falta el paquete oficial NVIDIA.");
+    else if (dlss_candidate) ImGui::TextDisabled(g.ui_lang ? "DLSS runtime installed; GPU/driver checked on launch." : "DLSS instalado; la GPU/controlador se comprueba al iniciar.");
     ImGui::SetItemTooltip(T("FSR 1.0: escalado espacial, solo cuando la resolución interna es menor que la ventana.\n"
                           "FSR 3.1 y DLSS: reconstrucción temporal - renderizan a menos resolución (según la calidad)\n"
                           "y reconstruyen la imagen de la ventana con varios frames: más FPS y bordes sin dientes.\n"
                           "Sustituyen al antialiasing temporal del juego. DLSS necesita una GPU NVIDIA RTX; si no\n"
                           "está disponible se usa FSR 3.1."));
-    if (g.upscaler >= 2) {
+    if (g.upscaler >= 2 || (g.upscaler_auto && dlss_candidate)) {
         const char *uq[] = {"Nativo (solo antialiasing: DLAA / FSR Native AA)", "Calidad (67 %)", "Equilibrado (59 %)",
                             "Rendimiento (50 %)", "Ultra rendimiento (33 %)"};
         ImGui::SetNextItemWidth(320 * g_scale);
-        ImGui::Combo(T("Calidad del escalado"), &g.uquality, TL(uq, 5).p, 5);
+        monado_combo(T("Calidad del escalado"), &g.uquality, TL(uq, 5).p, 5);
         ImGui::SetItemTooltip(T("Con 'Resolución interna' en 'Igual que la ventana': la resolución a la que se renderiza\n"
                               "antes de reconstruir (porcentaje del lado de la ventana)."));
         ImGui::Checkbox(T("Generación de frames (FSR 3)"), &g.frame_gen);
@@ -694,24 +839,26 @@ static void tab_graphics() {
     ImGui::SetItemTooltip(T("El antialiasing temporal (TMAA), el desenfoque de movimiento y el del pelo que el juego\n"
                           "aplica para los 720p de la Switch: a 1080p o más suavizan toda la imagen.\n"
                           "Desactivado: imagen nítida (combínalo con SMAA para los bordes)."));
+    ImGui::Checkbox(g.ui_lang ? "On-screen FPS counter" : "Contador FPS en pantalla", &g.fps_overlay);
     ImGui::Checkbox(T("Mostrar FPS en la barra de título"), &g.show_fps);
     ImGui::SeparatorText(T("Velocidad"));
-    static const char *fps_ui[] = {"30 (como en Switch)", "60", "120", "144", "165", "Sin límite"};
-    ImGui::Combo("FPS", &g.fps, TL(fps_ui, 6).p, 6);
-    ImGui::SetItemTooltip(T("Más de 30: la velocidad del mundo, el reloj y las escenas no cambian (probado a 60 y 120);\n"
-                          "la cámara queda un poco más lejos. El V-Sync forzado en el panel de NVIDIA / AMD o el límite\n"
-                          "de RivaTuner también limitan los FPS: déjalos en 'configuración de la aplicación' / 0."));
     ImGui::Checkbox(T("V-Sync (con 30 / 60 FPS)"), &g.vsync);
     ImGui::SetItemTooltip(T("Cada imagen se muestra exactamente una vez, sincronizada con la pantalla: movimiento\n"
                           "fluido (sin imágenes repetidas o saltadas). Con más de 60 FPS o sin límite no se aplica."));
     static const char *cut_ui[] = {"Como el resto del juego", "30 estables (como en Switch)"};
     ImGui::SetNextItemWidth(320 * g_scale);
-    ImGui::Combo(T("Cinemáticas"), &g.cutscenes, TL(cut_ui, 2).p, 2);
+    monado_combo(T("Cinemáticas"), &g.cutscenes, TL(cut_ui, 2).p, 2);
     ImGui::SetItemTooltip(T("En las cinemáticas el juego anima a los personajes a 30 aunque juegues a más FPS: con la\n"
                           "cámara a 60 encima se notan saltos (p. ej. el pelo de Dickson).\n"
                           "30 estables: las cinemáticas van a 30 parejos, cámara y personajes juntos (con V-Sync en un\n"
                           "monitor de 60 Hz cada imagen dura exactamente dos refrescos).\n"
                           "Con 'Generación de frames solo en cinemáticas' también van a 30, con generación encima."));
+    editable=quality_settings(); monado_effect_controls(&editable,g.ui_lang!=0); quality_from_settings(editable);
+    if (g.quality_preset==preset_before && !xcde_quality_equal(before,xcde_quality_current(&editable))) g.quality_preset=QUALITY_CUSTOM;
+    if (ImGui::Button(g.ui_lang ? "Restore graphics" : "Restaurar gráficos")) {
+        xcde_quality_apply(&editable,QUALITY_BALANCED); quality_from_settings(editable);
+    }
+
 }
 
 static void tab_controls() {
@@ -727,11 +874,14 @@ static void tab_controls() {
     ImGui::SameLine();
     if (ImGui::Button(T("Restaurar mando"))) for (int i = 0; i < NPAD; i++) g.pad[i] = k_def_pad[i];
     ImGui::SameLine();
-    int npads = 0;
-    SDL_JoystickID *ids = SDL_GetGamepads(&npads);
-    if (npads > 0) ImGui::Text(T("   Mando conectado: %s"), SDL_GetGamepadNameForID(ids[0]));
+    static uint64_t pad_at; static std::string pad_name;
+    if (!pad_at || SDL_GetTicks()-pad_at>500) {
+        int npads=0; SDL_JoystickID *ids=SDL_GetGamepads(&npads);
+        const char *name=npads>0 ? SDL_GetGamepadNameForID(ids[0]) : nullptr;
+        pad_name=name ? name : ""; SDL_free(ids); pad_at=SDL_GetTicks();
+    }
+    if (!pad_name.empty()) ImGui::Text(T("   Mando conectado: %s"),pad_name.c_str());
     else ImGui::TextDisabled(T("   (ningún mando detectado)"));
-    SDL_free(ids);
     ImGui::Checkbox(T("Cambiar de personaje como en Xenoblade 3 (mantén L2 y pulsa L1 / R1: el de arriba / abajo; F2)"), &g.party_switch);
     ImGui::SetItemTooltip(T("Pasa el control al siguiente miembro del grupo, en el campo y en combate. Cada uno se queda\n"
                           "donde está y conserva sus recargas de artes; el anterior pasa a la IA. No funciona en menús ni\n"
@@ -740,7 +890,7 @@ static void tab_controls() {
         static const char *ic_ui[] = {"Automático (el mando conectado; sin mando, teclado)", "Switch", "Xbox", "PlayStation",
                                       "Teclado (las teclas asignadas)"};
         ImGui::SetNextItemWidth(340 * g_scale);
-        ImGui::Combo(T("Iconos de botones"), &g.icons, TL(ic_ui, 5).p, 5);
+        monado_combo(T("Iconos de botones"), &g.icons, TL(ic_ui, 5).p, 5);
         int ic = icons_effective(g.icons);
         if ((ic == 2 || ic == 3) && !exists((std::string("mods/") + k_icon_mod[ic - 2] + "/romfs").c_str()))  // (4: keyboard, no pack)
             ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), T("Falta el pack: descarga \"%s\" de GameBanana y pon su carpeta romfs en mods\\%s"),
@@ -751,7 +901,7 @@ static void tab_controls() {
     {
         static const char *ml_ui[] = {"No", "Manteniendo el botón derecho", "Siempre"};
         ImGui::SetNextItemWidth(260 * g_scale);
-        ImGui::Combo(T("Cámara con el ratón"), &g.mouse_look, TL(ml_ui, 3).p, 3);
+        monado_combo(T("Cámara con el ratón"), &g.mouse_look, TL(ml_ui, 3).p, 3);
         ImGui::SetItemTooltip(T("Siempre: el ratón mueve la cámara directamente y el cursor queda oculto dentro del juego.\n"
                               "F1 (menú) o Alt+Tab lo liberan; al mover el ratón sobre el juego vuelve a capturarse."));
     }
@@ -896,7 +1046,7 @@ static void tab_mods() {
     int shown = 0;
     for (Mod &m : g_mods) {
         if (!m.present || is_icon_mod(m.name)) continue;
-        ImGui::Checkbox(m.name.c_str(), &m.on);
+        if (ImGui::Checkbox(m.name.c_str(), &m.on)) g_mod_dirty=true;
         shown++;
     }
     if (!shown) ImGui::TextDisabled(T("No hay mods instalados."));
@@ -909,7 +1059,7 @@ static void tab_audio() {
     ImGui::Checkbox(T("Sonido de los vídeos"), &g.movie_audio);
     ImGui::SeparatorText(T("Idioma del juego"));
     ImGui::SetNextItemWidth(260 * g_scale);
-    ImGui::Combo(T("Idioma"), &g.lang, TL(k_lang_ui, 7).p, 7);
+    monado_combo(T("Idioma"), &g.lang, TL(k_lang_ui, 7).p, 7);
     ImGui::TextDisabled(T("Textos del juego. Solo los idiomas que incluya tu copia; si uno falla, vuelve a Inglés."));
 }
 
@@ -974,29 +1124,32 @@ int main(int argc, char **argv) {
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = NULL;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NavEnableKeyboard;
-    float scale = SDL_GetWindowDisplayScale(win);
+    float scale = shot && argc>6 ? (float)atof(argv[6]) : SDL_GetWindowDisplayScale(win);
     if (scale <= 0) scale = 1;
     g_scale = scale;
+    SDL_SetWindowMinimumSize(win,720,540);
     SDL_SetWindowSize(win, (int)(980 * scale), (int)(680 * scale));
+    if (shot && argc>5) { int h=std::clamp(atoi(argv[5]),540,2160); SDL_SetWindowSize(win,h*16/9,h); }
     SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     if (!shot) SDL_ShowWindow(win);
     if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f * scale)) io.Fonts->AddFontDefault();
-    ImGui::StyleColorsDark();
-    ImGuiStyle &st = ImGui::GetStyle();
-    st.WindowRounding = 0; st.FrameRounding = 4; st.FramePadding = ImVec2(8, 5); st.ItemSpacing = ImVec2(10, 8);
-    st.ScaleAllSizes(scale);
-    st.Colors[ImGuiCol_Button] = ImVec4(0.18f, 0.35f, 0.55f, 1);
-    st.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.47f, 0.72f, 1);
+    monado_theme(scale);
     ImGui_ImplSDL3_InitForSDLRenderer(win, ren);
     ImGui_ImplSDLRenderer3_Init(ren);
     load();
+    if (shot && argc>4 && !strcmp(argv[4],"es")) g.ui_lang=0;
     bool have_game = exists("targets/exefs/main") || exists("targets/exefs");
     bool have_exe = exists("build/xcde.exe");
     bool run = true, launched = false;
+    Cfg saved_cfg; memcpy(&saved_cfg,&g,sizeof g);
+    int section=shot ? (shot_tab==4 ? 0 : shot_tab==5 ? 5 : shot_tab==0 ? 1 : shot_tab==1 ? 2 : shot_tab==2 ? 3 : 4) : 0;
+    uint64_t last_input=SDL_GetTicks(); bool got_event=false;
     if (shot_pc) pc_start(false);
     while (run) {
         SDL_Event e;
+        got_event=false;
         while (SDL_PollEvent(&e)) {
+            got_event=true; last_input=SDL_GetTicks();
             if (capture_event(e)) continue;
             ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) run = false;
@@ -1010,9 +1163,9 @@ int main(int argc, char **argv) {
         ImGui::SetNextWindowSize(vp->WorkSize);
         ImGui::Begin("main", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         ImGui::SetWindowFontScale(1.5f);
-        ImGui::TextColored(ImVec4(0.55f, 0.85f, 1, 1), "Xenoblade Chronicles: Definitive Edition");
+        ImGui::TextColored(monado_rgb(0x59C985), "Monado");
         ImGui::SetWindowFontScale(1.0f);
-        ImGui::TextDisabled("%s", T("Recompilación nativa para PC · configuración"));
+        ImGui::TextDisabled("Xenoblade Chronicles: Definitive Edition");
         {   // [XCDE] the launcher's own language (Spanish / English), saved with the settings
             static const char *ll[] = {"Español", "English"};
             ImGui::SameLine(ImGui::GetContentRegionMax().x - 330 * scale);
@@ -1020,18 +1173,21 @@ int main(int argc, char **argv) {
             ImGui::Combo(T("Idioma del launcher"), &g.ui_lang, ll, 2);
         }
         float bottom = ImGui::GetFrameHeightWithSpacing() * (pc_running() ? 3.3f : 2.2f);
-        ImGui::BeginChild("tabs", ImVec2(0, -bottom));
-        if (ImGui::BeginTabBar("t")) {
-            ImGuiTabItemFlags f0 = shot && shot_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0, f1 = shot && shot_tab == 1 ? ImGuiTabItemFlags_SetSelected : 0,
-                              f2 = shot && shot_tab == 2 ? ImGuiTabItemFlags_SetSelected : 0;
-            if (ImGui::BeginTabItem(T("Gráficos"), NULL, f0)) { tab_graphics(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem(T("Controles"), NULL, f1)) { tab_controls(); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem(T("Audio e idioma"), NULL, f2)) { tab_audio(); ImGui::EndTabItem(); }
-            ImGuiTabItemFlags f3 = shot && shot_tab == 3 ? ImGuiTabItemFlags_SetSelected : 0;
-            if (ImGui::BeginTabItem(T("Mods"), NULL, f3)) { tab_mods(); ImGui::EndTabItem(); }
-            ImGui::EndTabBar();
+
+        ImGui::BeginChild("navigation",ImVec2(164*scale,-bottom),ImGuiChildFlags_Borders);
+        const char *es[]={"Inicio","Gráficos","Controles","Audio e idioma","Mods","Diagnóstico"};
+        const char *en[]={"Home","Graphics","Controls","Audio & language","Mods","Diagnostics"};
+        for (int i=0;i<6;i++) if (ImGui::Selectable(g.ui_lang ? en[i] : es[i],section==i,0,ImVec2(0,32*scale))) section=i;
+        ImGui::Separator();
+        if (ImGui::Button(T("Salir"),ImVec2(-1,0))) run=false;
+        ImGui::EndChild(); ImGui::SameLine();
+        ImGui::BeginChild("content",ImVec2(0,-bottom),ImGuiChildFlags_Borders);
+        ImGui::PushItemWidth(fminf(340*scale,ImGui::GetContentRegionAvail().x*0.60f));
+        switch(section) {
+        case 0: tab_home(); break; case 1: tab_graphics(); break; case 2: tab_controls(); break;
+        case 3: tab_audio(); break; case 4: tab_mods(); break; default: tab_diagnostics(); break;
         }
-        ImGui::EndChild();
+        ImGui::PopItemWidth(); ImGui::EndChild();
         ImGui::Separator();
         if (!have_game) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", T("Faltan los archivos del juego en targets/ (exefs y romfs de tu copia)."));
         else if (!have_exe) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", T("Falta build/xcde.exe (compila el juego primero)."));
@@ -1063,22 +1219,17 @@ int main(int argc, char **argv) {
         }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
-        if (ImGui::Button(T("Precompilar shaders"))) pc_start(false);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(T("Traduce y compila todos los shaders del juego por adelantado, para que la primera visita\n"
-                              "a una zona no se detenga a compilarlos. Solo hace falta una vez (o tras actualizar el juego)."));
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button(T("Guardar ajustes"))) g_status = save() ? T("Ajustes guardados en xcde.ini") : T("No se pudo escribir xcde.ini");
-        ImGui::SameLine();
-        if (ImGui::Button(T("Crear reporte"))) make_report();
-        ImGui::SetItemTooltip(T("Junta en un .zip los logs de las dos últimas partidas, xcde.ini y el último informe de\n"
-                              "cierre inesperado (sin partidas guardadas ni archivos del juego), para adjuntarlo a un reporte."));
-        ImGui::SameLine();
-        if (ImGui::Button(T("Salir"))) run = false;
+        bool pending=g_mod_dirty || memcmp(&saved_cfg,&g,sizeof g)!=0;
+        if (ImGui::Button(g.ui_lang ? "Apply" : "Aplicar")) {
+            if (save()) { memcpy(&saved_cfg,&g,sizeof g); g_mod_dirty=false; g_status=T("Ajustes guardados en xcde.ini"); }
+            else g_status=T("No se pudo escribir xcde.ini");
+        }
+        if (pending) { ImGui::SameLine(); ImGui::TextColored(monado_rgb(0xE4C477),"%s",g.ui_lang ? "Unsaved" : "Sin guardar"); }
         ImGui::End();
         ImGui::Render();
-        SDL_SetRenderDrawColor(ren, 18, 20, 26, 255);
+        SDL_SetRenderDrawColor(ren, 16, 20, 17, 255);
         SDL_RenderClear(ren);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), ren);
         if (shot && ++frame_no == (shot_pc ? 300 : 5)) {
@@ -1087,6 +1238,10 @@ int main(int argc, char **argv) {
             run = false;
         }
         SDL_RenderPresent(ren);
+        // T261: event-aware idle throttling; input immediately wakes the launcher.
+        if (!shot && !pc_running() && !got_event && SDL_GetTicks()-last_input>1500) {
+            SDL_Event wake; if (SDL_WaitEventTimeout(&wake,(SDL_GetWindowFlags(win)&SDL_WINDOW_MINIMIZED) ? 250 : 80)) SDL_PushEvent(&wake);
+        }
     }
     if (!launched) pc_stop();  // (closing the launcher stops a precompilation; what it wrote is kept)
     ImGui_ImplSDLRenderer3_Shutdown();

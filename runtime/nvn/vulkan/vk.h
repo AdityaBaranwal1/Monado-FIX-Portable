@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
+#include "dispatch.h"
+#include "gpu_probe.h"
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else
@@ -24,6 +26,9 @@ void vk_device_fault_report(void);
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 
 typedef struct {
+    uint32_t api_version, loader_api_version;
+    bool pipeline_cache_control;
+    XcdeVkDispatch dispatch;
     VkInstance inst;
     VkPhysicalDevice phys;
     VkDevice dev;
@@ -32,6 +37,7 @@ typedef struct {
     uint32_t phys_index;  // index from vkEnumeratePhysicalDevices, for diagnostics and manual selection
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
+    VkPhysicalDeviceMemoryProperties memory_props; // T260: immutable for the lifetime of this physical device
     VkPhysicalDeviceDriverProperties driver_props;
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
@@ -51,6 +57,15 @@ typedef struct {
     VkImageView sc_views[8];
 } VkG;
 extern VkG g_vk;
+extern XcdeGpu *g_vk_adapters;
+extern uint32_t g_vk_adapter_count;
+
+// [XCDE] T250: do not call core 1.3 loader stubs on 1.2 extension devices.
+#define vkCmdBeginRendering g_vk.dispatch.begin_rendering
+#define vkCmdEndRendering g_vk.dispatch.end_rendering
+#define vkCmdPipelineBarrier2 g_vk.dispatch.barrier2
+#define vkQueueSubmit2 g_vk.dispatch.submit2
+#define vkCmdWriteTimestamp2 g_vk.dispatch.timestamp2
 
 // ---- submissions (exec.c)
 // Work is recorded into the current command buffer; uploads go into a separate one that runs first.
@@ -61,6 +76,9 @@ uint64_t vk_completed_seq(void);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
+void vk_external_state_changed(void); // restore tracked state after a vendor SDK dispatch
+double vk_native_gpu_ms(void); // latest complete native-frame GPU sum, -1 if unavailable/stale; never waits
+void vk_metrics_frame(uint64_t frame, uint64_t now_ns, uint64_t present_ns);
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra);  // submit + one more cb (present)
 
 // Transient GPU-visible memory that lives until the submission it was allocated for completes.
@@ -95,6 +113,8 @@ typedef struct TexBackend {
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
+    struct TexBackend *address_next; // T260: renderer-thread address index, same sharing rules as the live list
+    unsigned address_bucket;
     // [XCDE] other NVN texture objects over the same storage (same address, size, compatible format - e.g. the
     // game's stencil-mode texture over its G-buffer depth): they share this image instead of an empty one of their own
     struct NvnTexture *share[8];
@@ -123,6 +143,8 @@ VkSampler vk_default_sampler(bool linear);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
 void vk_defer_image(VkImage img, VmaAllocation mem);
+void vk_defer_buffer(VkBuffer buf, VmaAllocation mem);
+void vk_defer_import(VkBuffer buf, VkDeviceMemory mem);
 void vk_defer_view(VkImageView v);
 void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an image being replaced
 uint64_t vk_frame_counter(void);

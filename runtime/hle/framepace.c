@@ -17,6 +17,14 @@
 #include "../hle.h"
 #include "../platform.h"
 #include "../settings.h"
+#include "../kernel.h"
+#include "../frame_clock.h"
+
+// [XCDE] T249: one sample per guest frame, independent of presentation/FG and selected FPS.
+static XcdeFrameClock xcde_clock;
+uint64_t xcde_frame_now_ns(void) { return kernel_det() ? kernel_vnow(0) : plat_now_ns(); }
+uint32_t xcde_frame_threshold_current(uint32_t n) { return xcde_frame_threshold(&xcde_clock, n); }
+RT_ON_RESET(xcde_clock_reset) { memset(&xcde_clock, 0, sizeof xcde_clock); }
 
 extern volatile uint64_t g_vsync_count;  // runtime/hle/vi.c
 uint64_t g_frame_steps_late;             // (stats) frames that advanced more than one step
@@ -114,19 +122,17 @@ static void fps_interval_force(void) {
         want = e ? atoi(e) : fps == 30 ? -1 : 1;
         e = ENV("XCDE_FPS_PERIOD_SCALE");
         scale = e ? (float)atof(e) : fps == 0 ? 0.02f : fps > 60 ? 60.0f / (float)fps : 0;
-        e = ENV("XCDE_FPS_AFTER_S"); after = plat_now_ns() + (e ? (uint64_t)(atof(e) * 1e9) : 0);
+        e = ENV("XCDE_FPS_AFTER_S"); after = xcde_frame_now_ns() + (e ? (uint64_t)(atof(e) * 1e9) : 0);
         e = ENV("XCDE_FPS_AFTER_FRAMES"); after_frames = e ? strtoull(e, NULL, 10) : 0;
     }
     frames++;
     g_cut30 = g_settings.cutscene_mode && !ENV("XCDE_FPS_INTERVAL") && xcde_in_cutscene();
-    if (want < 0 || plat_now_ns() < after || frames < after_frames) return;
+    if (want < 0 || xcde_frame_now_ns() < after || frames < after_frames) return;
     uint32_t *p = (uint32_t *)(uintptr_t)*(volatile uint64_t *)(uintptr_t)0x7000b92ea0ull;
     if (!p) return;
-    if (g_cut30) {  // 30 fps: two display periods (the limiter's constant may be scaled for above 60)
-        int iv = (int)lroundf(2.0f / (scale > 0 ? scale : 1.0f));
-        *p = (uint32_t)(iv < 2 ? 2 : iv);
-        return;
-    }
+    // T249: use the original period at 30 Hz, rather than rounding 2/scale to an integer
+    // (144 Hz used interval 5, yielding 34.72 ms and a different cinematic speed).
+    int target_interval = g_cut30 || want < 0 ? 2 : want;
     static int logged;
     if (!logged && *p != (uint32_t)want) { logged = 1; LOG("[fps] frame interval %u -> %d\n", *p, want); }
     {   // XCDE_FPS_LOG=1: how often the game set its interval back since the last frame (per 120 frames)
@@ -135,17 +141,18 @@ static void fps_interval_force(void) {
         if (lg < 0) lg = ENV("XCDE_FPS_LOG") != NULL;
         if (lg) { reset += *p != (uint32_t)want; if (++n % 120 == 0) { LOG("[fps] frame %llu: interval set back %d of 120 frames\n", (unsigned long long)n, reset); reset = 0; } }
     }
-    *p = (uint32_t)want;
+    *p = (uint32_t)target_interval;
     if (scale > 0) {
         volatile float *k = (volatile float *)(uintptr_t)0x70009d3dccull;
         static int done;
+        static float original;
         if (!done) {
             done = 1;
-            float orig = *k;
+            original = *k;
             plat_protect((uint64_t)(uintptr_t)k & ~0xFFFull, 0x1000, PLAT_PROT_RW);
-            *k = orig * scale;
-            LOG("[fps] limiter period constant %g -> %g\n", (double)orig, (double)*k);
         }
+        float desired = original * (g_cut30 ? 1.0f : scale);
+        if (*k != desired) { *k = desired; LOG("[fps] limiter period %g (interval %d)\n", (double)*k, target_interval); }
     }
 }
 
@@ -658,6 +665,7 @@ static void fvalfind(void) {
 }
 
 void xcde_limiter_done(void) {
+    xcde_frame_clock_step(&xcde_clock, xcde_frame_now_ns());
     fvalfind();
     floatfind();
     fpoke();

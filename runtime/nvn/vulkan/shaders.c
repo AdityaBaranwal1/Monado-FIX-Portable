@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 
 #include "shaders.h"
+#include "../../cache_validation.h"
+#include "../../host/atomic_file.h"
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -22,6 +24,10 @@ static shaderc_shader_kind kind_of(int stage) {
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
 static uint64_t src_hash(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
+    // T250: target environment, optimization and translator/postprocess revision belong in the cache key.
+    h ^= (uint64_t)g_vk.api_version << 17;
+    h ^= getenv("LARECOMP_VK_OPT") ? 0x6f7074696d697a65ull : 0;
+    h ^= 0x544B323530000001ull;
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
@@ -80,8 +86,11 @@ static void pack_insert(const PackEntry *e) {
     if ((pack_n + 1) * 10 > pack_cap * 6) {
         size_t oc = pack_cap;
         PackEntry *ot = pack_tab;
-        pack_cap = oc ? oc * 2 : 1u << 17;
-        pack_tab = calloc(pack_cap, sizeof *pack_tab);
+        size_t next_cap = oc ? oc * 2 : 1u << 17;
+        if (next_cap > (1u << 22)) return;
+        PackEntry *next_tab = calloc(next_cap, sizeof *next_tab);
+        if (!next_tab) return;
+        pack_cap = next_cap; pack_tab = next_tab;
         pack_n = 0;
         for (size_t i = 0; i < oc; i++) if (ot[i].hash) pack_insert(&ot[i]);
         free(ot);
@@ -156,12 +165,12 @@ static uint32_t *pack_get(uint64_t h, size_t *nwords) {
     if (!e) { pack_refresh(); e = pack_find(h); }
     PackEntry c = e ? *e : (PackEntry){0};
     pthread_mutex_unlock(&pack_lock);
-    if (!c.hash || c.bytes < 20 || c.bytes % 4 || c.off < 16) return NULL;
+    if (!c.hash || !xcde_spirv_size_valid(c.bytes) || c.off < 16) return NULL;
     uint32_t hdr[4];
     uint32_t *d = malloc(c.bytes);
-    if (pread64_(pack_fd, hdr, 16, (int64_t)c.off - 16) != 16 || hdr[0] != 0x56505358u || hdr[1] != c.bytes ||
+    if (!d || pread64_(pack_fd, hdr, 16, (int64_t)c.off - 16) != 16 || hdr[0] != 0x56505358u || hdr[1] != c.bytes ||
         ((uint64_t)hdr[3] << 32 | hdr[2]) != h || pread64_(pack_fd, d, c.bytes, (int64_t)c.off) != (ssize_t)c.bytes ||
-        d[0] != 0x07230203) {
+        !xcde_spirv_valid(d, c.bytes, g_vk.api_version >= VK_API_VERSION_1_3 ? 0x10600 : 0x10500)) {
         free(d);
         return NULL;
     }
@@ -177,6 +186,7 @@ static bool pack_has(uint64_t h) {
 }
 
 static bool pack_put(uint64_t h, const uint32_t *spv, size_t nwords) {
+    if (nwords > XCDE_SPIRV_MAX_BYTES / 4) return false;
     pthread_mutex_lock(&pack_lock);
     if (!pack_open()) { pthread_mutex_unlock(&pack_lock); return false; }
     file_lock(idx_fd, true);
@@ -186,6 +196,7 @@ static bool pack_put(uint64_t h, const uint32_t *spv, size_t nwords) {
     if (!ok && psz >= 0 && isz >= 0) {
         size_t bytes = nwords * 4;
         uint8_t *rec = malloc(16 + bytes);
+        if (!rec) { file_lock(idx_fd, false); pthread_mutex_unlock(&pack_lock); return false; }
         uint32_t hdr[4] = {0x56505358u, (uint32_t)bytes, (uint32_t)h, (uint32_t)(h >> 32)};
         memcpy(rec, hdr, 16);
         memcpy(rec + 16, spv, bytes);
@@ -216,13 +227,13 @@ static uint32_t *loose_load(uint64_t h, size_t *nwords) {
     snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint32_t *d = n > 20 && n % 4 == 0 ? malloc((size_t)n) : NULL;
+    if (n < 0 || !xcde_spirv_size_valid((uint64_t)n) || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    uint32_t *d = malloc((size_t)n);
     if (d && fread(d, 1, (size_t)n, f) != (size_t)n) { free(d); d = NULL; }
     fclose(f);
-    if (d && d[0] != 0x07230203) { free(d); d = NULL; }
+    if (d && !xcde_spirv_valid(d, (size_t)n, g_vk.api_version >= VK_API_VERSION_1_3 ? 0x10600 : 0x10500)) { free(d); d = NULL; }
     if (d) *nwords = (size_t)n / 4;
     return d;
 }
@@ -237,8 +248,8 @@ static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     FILE *f = fopen(tmp, "wb");
     if (!f) return;
     bool ok = fwrite(spv, 4, nwords, f) == nwords;
-    fclose(f);
-    if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
+    if (fclose(f) != 0) ok = false;
+    if (!ok || !xcde_atomic_replace(tmp, path)) remove(tmp);  // (another thread may have stored it first)
 }
 
 // Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth
@@ -326,17 +337,23 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     static __thread shaderc_compiler_t comp;
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
-    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
+    shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, g_vk.api_version >= VK_API_VERSION_1_3 ? shaderc_env_version_vulkan_1_3 : shaderc_env_version_vulkan_1_2);
+    shaderc_compile_options_set_target_spirv(o, g_vk.api_version >= VK_API_VERSION_1_3 ? shaderc_spirv_version_1_6 : shaderc_spirv_version_1_5);
     shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_OPT") ? shaderc_optimization_level_performance
                                                                                   : shaderc_optimization_level_zero);
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
+        LOG("[shader] compilation failure: GPU=%s vendor=%04x driver=%u target=%u.%u stage=%d name=%s\n",
+            g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.driverVersion,
+            VK_API_VERSION_MAJOR(g_vk.api_version), VK_API_VERSION_MINOR(g_vk.api_version), stage, name);
+        if (getenv("XCDE_STRICT_RENDER")) FATAL("[shader] %s: %s\n", name, shaderc_result_get_error_message(r));
         static int nlog;
         if (nlog++ < 20) LOG("[shader] %s: GLSL compile failed:\n%s\n%s\n", name, shaderc_result_get_error_message(r), src);
     } else {
         size_t n = shaderc_result_get_length(r);
         out = malloc(n);
+        if (!out) { LOG("[shader] cannot allocate compiled SPIR-V (%zu bytes)\n", n); shaderc_result_release(r); return NULL; }
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
         if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);

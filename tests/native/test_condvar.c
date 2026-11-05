@@ -17,6 +17,7 @@ void rt_fault_report(const char *w, uint64_t a, uint64_t p, uint64_t l) { (void)
 bool rt_fault_watch(uint64_t a, uint64_t p) { (void)a; (void)p; return false; }
 const char *rt_host_fn_name(uint64_t pc, uint64_t *o) { (void)pc; (void)o; return NULL; }
 uint32_t vi_vsync_handle(void) { return 0; }
+uint64_t renderer_present_count(void) { return 0; } // no renderer in this kernel-only harness
 const char *loader_symbol_at(uint64_t a, uint64_t *o) { (void)a; (void)o; return NULL; }
 void diag_crash_report(void *ep) { (void)ep; }
 

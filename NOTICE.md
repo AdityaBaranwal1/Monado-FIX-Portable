@@ -49,3 +49,5 @@ Every edit to a copied file is marked `[XCDE]` (the project's working name) and 
 | AMD FidelityFX SDK 1.1.4 signed DLL (`amd_fidelityfx_vk.dll`) | FSR 3.1 upscaling and frame generation |
 | NVIDIA Streamline 2.14.16 + DLSS DLLs | DLSS |
 | Button icon packs from GameBanana (CompC: "Xbox control layout", "PS5 DualSense control layout", CC BY-NC-ND) | controller prompts; installed by the user into `mods/` |
+
+`tools/install_dlss.py` retrieves Streamline 2.14.16 from NVIDIA-RTX's official GitHub release, verifies the pinned archive SHA-256 and installs production x64 binaries into the ignored `build/` directory. The release's licence files are retained in `sdk/sl/licenses/` and `build/dlss-licenses/`; source control contains no vendor binaries. The existing local packager preserves these files and the source/hash manifest when present.

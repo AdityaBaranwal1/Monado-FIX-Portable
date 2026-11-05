@@ -17,10 +17,11 @@
 #include <unistd.h>
 
 #include "../platform.h"
+#include "romfs_fd_cache.h"
 
 #define EMPTY 0xFFFFFFFFu
 #define DATA_START 0x200u
-#define FD_CACHE 256
+#define FD_CACHE XCDE_FD_CACHE
 
 typedef struct Dir Dir;
 typedef struct { char *name, *path; uint64_t size, data_off; uint32_t off; Dir *parent; int index; uint8_t *mem; bool traced; } File;
@@ -33,7 +34,7 @@ static uint8_t *g_tables;      // dir hash + dir meta + file hash + file meta, c
 static uint64_t g_tables_off, g_tables_size, g_image_size, g_data_end;
 static File **g_files;         // sorted by data_off (table order)
 static int g_nfiles;
-static struct { int file; int fd; int users; uint64_t stamp; } g_fds[FD_CACHE];
+static XcdeFdEntry g_fds[FD_CACHE];
 static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;  // [XCDE] the loader threads read concurrently (T108)
 static uint64_t g_stamp;
 
@@ -45,6 +46,7 @@ static int by_name_file(const void *a, const void *b) { return strcmp((*(File *c
 // (tmaa), FXAA-style AntiAliasing, motion blur (blur2) and fur blur - made for the Switch's 720p, they soften a 4K
 // image (the same edit as the community "AA/Blur Removal" mod). XCDE_LIBNX="key=value,key=value": test edits.
 #include "../settings.h"
+#include "../quality_policy.h"
 static void edit_ini(File *f, const char *edits) {
     FILE *in = fopen(f->path, "rb");
     if (!in) return;
@@ -104,6 +106,11 @@ static void maybe_edit(File *f) {
     if (!g_settings.game_blur) strcat(edits, "AntiAliasing=off,tmaa=off,blur2=off,furBlur=off");
     // [XCDE] FSR 3 / DLSS replace the game's own anti-aliasing (its temporal AA would blur their jittered input)
     else if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DLSS) strcat(edits, "AntiAliasing=off,tmaa=off");
+    // T259: opt-in, whitelisted cosmetic edits. Mods are read first; explicit diagnostic edits below win.
+    static const char *effect_keys[]={"tssao=off", "ssr=off", "bloom=off", "godray=off", "shadowCloud=off"};
+    for (unsigned i=0;i<5;i++) if (g_settings.effects_off&(1u<<i)) {
+        if (*edits) strcat(edits,","); strcat(edits,effect_keys[i]);
+    }
     const char *e = getenv("XCDE_LIBNX");
     if (e && *e) { if (*edits) strcat(edits, ","); strncat(edits, e, sizeof edits - strlen(edits) - 1); }
     if (*edits) edit_ini(f, edits);
@@ -341,36 +348,9 @@ uint64_t rvfs_size(void) { return g_image_size; }
 // mid-pread (-> read as zeros, or another file's bytes after the fd number was reused). A slot in use is never recycled:
 // the colliding reader gets a private descriptor instead. `*slot` is -1 for a private one.
 static int file_fd(int idx, int *slot) {
-    int s = idx % FD_CACHE, fd;
-    pthread_mutex_lock(&g_fd_lock);
-    if (g_fds[s].file == idx && g_fds[s].fd >= 0) {
-        g_fds[s].users++;
-        *slot = s;
-        fd = g_fds[s].fd;
-    } else if (g_fds[s].users == 0) {
-        if (g_fds[s].fd >= 0) close(g_fds[s].fd);
-        g_fds[s].fd = open(g_files[idx]->path, O_RDONLY | O_BINARY_FLAG);
-        g_fds[s].file = idx;
-        g_fds[s].users = g_fds[s].fd >= 0;
-        *slot = g_fds[s].fd >= 0 ? s : -1;
-        fd = g_fds[s].fd;
-    } else {
-        *slot = -1;
-        fd = open(g_files[idx]->path, O_RDONLY | O_BINARY_FLAG);
-    }
-    pthread_mutex_unlock(&g_fd_lock);
-    return fd;
+    return xcde_fd_acquire(g_fds,&g_fd_lock,&g_stamp,idx,g_files[idx]->path,O_RDONLY|O_BINARY_FLAG,slot);
 }
-
-static void file_fd_release(int fd, int slot) {
-    if (slot >= 0) {
-        pthread_mutex_lock(&g_fd_lock);
-        g_fds[slot].users--;
-        pthread_mutex_unlock(&g_fd_lock);
-    } else if (fd >= 0) {
-        close(fd);
-    }
-}
+static void file_fd_release(int fd, int slot) { xcde_fd_release(g_fds,&g_fd_lock,fd,slot); }
 
 static void copy_mem(uint8_t *dst, uint64_t off, uint64_t n, const uint8_t *src, uint64_t src_off) {
     memcpy(dst, src + (off - src_off), (size_t)n);

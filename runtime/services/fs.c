@@ -442,6 +442,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         if ((uint64_t)size > b->size) size = (int64_t)b->size;
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
+        if (n < 0) { resp->result = errno_result(); LOG("[asset] read failed: %s offset=%lld bytes=%lld errno=%d\n", f->path, (long long)off, (long long)size, errno); }
+        else if (!f->save && getenv("XCDE_ASSET_TRACE")) LOG("[asset] read: %s offset=%lld requested=%lld read=%lld\n", f->path, (long long)off, (long long)size, (long long)n);
         if (f->save) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
             extern void save_editor_file_read(const char *path, uint64_t addr, int64_t off, int64_t size);
@@ -746,7 +748,13 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     case 8: {  // OpenFile(mode)
         uint32_t mode = IN(uint32_t, 0);
         int fd = open(p, (mode & 2) ? O_RDWR : O_RDONLY);
-        if (fd < 0) { resp->result = errno_result(); break; }
+        if (fd < 0) {
+            int error = errno; resp->result = errno_result();
+            static unsigned missing;
+            if (missing++ < 64 || getenv("XCDE_ASSET_TRACE")) LOG("[asset] open failed: %s mode=%u errno=%d\n", p, mode, error);
+            break;
+        }
+        if (!fs->save && getenv("XCDE_ASSET_TRACE")) LOG("[asset] open: %s mode=%u\n", p, mode);
         HostFile *f = calloc(1, sizeof *f);
         f->fd = fd;
         strlcpy(f->path, p, sizeof f->path);
