@@ -1,4 +1,4 @@
-# Rendimiento e interfaz — continuación local
+# Rendimiento e interfaz V6
 
 Se añadieron perfiles Equilibrado/Rendimiento/Patata, objetivos FPS independientes, optimizaciones internas y una interfaz grafito/verde. Los recortes decorativos nuevos son opcionales y experimentales. Uso, configuración, compilación y límites en [Rendimiento e interfaz](docs/PERFORMANCE_UI.md); resultados y pruebas pendientes en [evidencia local](docs/evidence/performance_ui_2026-11-04.md). No se promete una ganancia de FPS sin medición por escena/equipo.
 
