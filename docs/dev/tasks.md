@@ -1350,3 +1350,9 @@ Ver `docs/VULKAN_DLSS_FPS.md` para opciones, fuente oficial, hashes, resultado d
 - T261: implementados tema grafito/verde, bordes redondeados, navegación lateral, controles compartidos/responsivos y reducción de trabajo de UI. Aceptación: launcher enlazado y capturas nativas a 720p/1080p y 200 % DPI; navegación manual con mando y F1 en escenas jugables pendientes.
 
 Detalle: `docs/PERFORMANCE_UI.md`. Evidencia: `docs/evidence/performance_ui_2026-11-04.md`. No marcar compatibilidad de una familia a partir de una sola GPU.
+
+## DLSS y DLSS 5 — 2026-11-06 (T262–T264)
+
+- T262: DLSS se cerraba al arrancar y al precompilar (RTX 4070 Ti, Streamline 2.14.16): superficie con SDL y sin Streamline en `--precompile`. Aceptación: título y juego con DLSS SR "ready" y precompilación completa. Pendiente: el cuelgue de GPU al cargar partida con DLSS (`docs/DLSS5.md`, "Known issue"), con su reproducción.
+- T263: `XCDE_FULLSCREEN_MODE=WxH` (pantalla completa exclusiva). Aceptación: `[window] exclusive fullscreen 2560x1440 @ 120 Hz` y swapchain 2560x1440 en una pantalla 4K.
+- T264: DLSS 5 experimental vía ReShade + dlss5-bridge + renodx-dlss5 (`docs/DLSS5.md`, `tools/dlss5/`). Aceptación: `NR-VERDICT state=ENGAGED` y 60+ fps en el mundo a 1440p en una RTX 4070 Ti (`docs/evidence/dlss5_2026-11-06.md`). Una sola GPU/driver: no certifica otras.

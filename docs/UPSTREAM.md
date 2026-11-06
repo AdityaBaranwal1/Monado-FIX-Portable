@@ -31,3 +31,11 @@ Detalle y pruebas en `VULKAN_DLSS_FPS.md`. Los binarios NVIDIA viven solo en `sd
 - `runtime/ui/menu_vk.cpp`, nuevos helpers UI, `tools/launcher/launcher.cpp`: tema, navegación y configuración compartida. `scripts/native_tests.sh` y `tools/validate_port.py`: comprobaciones sin datos del juego.
 
 Justificación en ADR 0011. Se conserva la atribución y no se incorpora código de otros proyectos. No se ha enviado ningún cambio upstream ni publicado una distribución.
+
+## T262–T264 — DLSS al arrancar y precompilar, pantalla completa exclusiva, DLSS 5
+
+- `runtime/nvn/vulkan/dlss.cpp`: sin Streamline en `--precompile` (`XCDE_PRECOMPILING`); `dlss_create_surface` deja la superficie a SDL (el hook de Streamline se llamaba antes de `slSetVulkanInfo` y saltaba a la dirección 0).
+- `runtime/nvn/vulkan/device.c`: `XCDE_FULLSCREEN_MODE=WxH`, pantalla completa exclusiva en el modo de pantalla más cercano.
+- `tools/dlss5/`: bat, `bat_settings.ps1` y `ReShade.ini` de partida para DLSS 5 (ReShade + add-ons de terceros, fuera de Git).
+
+Detalle en `DLSS5.md`; evidencia en `evidence/dlss5_2026-11-06.md`. No se incluye ningún binario ni captura del juego.

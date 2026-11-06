@@ -61,6 +61,9 @@ static void sl_log(sl::LogType type, const char *msg) {
 
 // Before the Vulkan instance: load Streamline with the DLSS plugin (only when DLSS is the chosen upscaler).
 extern "C" bool dlss_init_early(void) {
+    // [XCDE] (not in `xcde.exe --precompile`: it starts before the settings are read, so the default "automatic" upscaler
+    // loaded Streamline into the hidden precompile window, and the run crashed right after "[dlss] Streamline loaded")
+    if (getenv("XCDE_PRECOMPILING")) { dlss_note_set("DLSS no se usa al precompilar"); return false; }
     if ((!g_settings.upscaler_auto && g_settings.upscaler != UPSCALE_DLSS) || getenv("XCDE_TMP_OFF")) {
         dlss_note_set("DLSS no solicitado (elige Automático o DLSS y reinicia)"); return false;
     }
@@ -233,19 +236,13 @@ extern "C" void dlss_device_created(VkInstance inst, VkPhysicalDevice phys, VkDe
     DLOG("[dlss] DLSS Super Resolution ready\n");
 }
 
-// T257: surface creation is also a mandatory Streamline Vulkan hook.
+// T257: surface creation through Streamline's vkCreateWin32SurfaceKHR. Not used (false: the caller makes the surface
+// with SDL, as before T257): the surface comes before slSetVulkanInfo (dlss_device_created), so Streamline's hook had
+// no instance dispatch yet and called address 0 - every start with DLSS chosen, and every precompile run, crashed
+// right after "[dlss] Streamline loaded" (RTX 4070 Ti, Streamline 2.14.16). DLSS itself doesn't need this hook.
 extern "C" bool dlss_create_surface(void *sdl_window, VkInstance instance, VkSurfaceKHR *surface) {
-    if (!sl_ok || !p_proxyInstanceProcAddr) return false;
-    auto create = (PFN_vkCreateWin32SurfaceKHR)p_proxyInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
-    HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties((SDL_Window *)sdl_window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-    if (!create || !hwnd) { sl_ok = false; dlss_note_set("No se pudo preparar la superficie DLSS"); return false; }
-    VkWin32SurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-    info.hinstance = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
-    if (!info.hinstance) info.hinstance = GetModuleHandleW(nullptr);
-    info.hwnd = hwnd;
-    VkResult r = create(instance, &info, nullptr, surface);
-    if (r != VK_SUCCESS) { sl_ok = false; dlss_note_set("La superficie DLSS falló; se usa Vulkan sin DLSS"); return false; }
-    return true;
+    (void)sdl_window; (void)instance; (void)surface;
+    return false;
 }
 
 // Streamline's proxies for the swapchain calls it intercepts (NULL: call Vulkan directly).

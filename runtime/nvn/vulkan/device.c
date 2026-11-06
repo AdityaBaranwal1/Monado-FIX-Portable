@@ -1446,7 +1446,19 @@ void ui_window_init(void) {
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) {
+        // [XCDE] XCDE_FULLSCREEN_MODE=WxH: exclusive fullscreen at the display mode closest to WxH (at the desktop's refresh
+        // rate) instead of borderless at the desktop's size - e.g. 2560x1440 on a 4K TV, so DLSS and everything that hooks
+        // it (DLSS 5 neural rendering) work on 1440p output and the TV scales it up
+        const char *fm = getenv("XCDE_FULLSCREEN_MODE");
+        int fw, fh;
+        SDL_DisplayMode mode;
+        if (fm && sscanf(fm, "%dx%d", &fw, &fh) == 2 &&
+            SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(window), fw, fh, 0.0f, false, &mode)) {
+            if (SDL_SetWindowFullscreenMode(window, &mode)) fprintf(stderr, "[window] exclusive fullscreen %dx%d @ %.0f Hz\n", mode.w, mode.h, mode.refresh_rate);
+        }
+        SDL_SetWindowFullscreen(window, true);
+    }
     {   // [XCDE] DLSS: Streamline must be loaded before the Vulkan instance (dlss.cpp)
         extern bool dlss_init_early(void);
         dlss_init_early();
